@@ -4,6 +4,8 @@ import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstr
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
 import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, ROOM_MESSAGE_TOOL, roomMessageInstructions } from './room-message-mcp.js';
+import { startFetchMcp, FETCH_SERVER, FETCH_TOOL, fetchInstructions } from './fetch-mcp.js';
+import { fetchAction } from './fetch.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
@@ -151,7 +153,7 @@ export function claudeApprovals(config: Config): boolean {
 }
 
 export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection,
-  replay = false, systemPromptSnapshot = false): string[] {
+  replay = false, systemPromptSnapshot = false, web?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -166,7 +168,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
   for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
-    [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL]] as const) {
+    [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL]] as const) {
     if (!connection) continue;
     servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
     allowed.push(tool);
@@ -266,6 +268,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
     let rooms: Awaited<ReturnType<typeof startRoomMessageMcp>> | undefined;
+    let web: Awaited<ReturnType<typeof startFetchMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     // Ends the turn's input: no further updates, unconfirmed ones are reported.
@@ -276,6 +279,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (hooks?.roomMessages) rooms = await startRoomMessageMcp(hooks.roomMessages, AbortSignal.any([signal, mediaLifetime.signal]));
+      // The tool writes response files into the workspace, so a read-only bot does not get it.
+      if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       if (hooks?.sendAttachments) {
         delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
@@ -286,7 +291,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : ''), publication, background, media, rooms, replay, systemPromptSnapshot), signal, (line, stdin) => {
+        routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+          + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -381,7 +387,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       await compactions.close();
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
-      close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();
+      close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await web?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();
     }
     signal.throwIfAborted();
     if (!results.length || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');

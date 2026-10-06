@@ -4,6 +4,8 @@ import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from '.
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER } from './attachment-mcp.js';
 import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, roomMessageInstructions } from './room-message-mcp.js';
+import { startFetchMcp, FETCH_SERVER, fetchInstructions } from './fetch-mcp.js';
+import { fetchAction } from './fetch.js';
 import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
@@ -68,11 +70,14 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
     let rooms: Awaited<ReturnType<typeof startRoomMessageMcp>> | undefined;
+    let web: Awaited<ReturnType<typeof startFetchMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (hooks?.roomMessages) rooms = await startRoomMessageMcp(hooks.roomMessages, AbortSignal.any([signal, mediaLifetime.signal]));
+      // The tool writes response files into the workspace, so a read-only bot does not get it.
+      if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
       if (hooks?.sendAttachments) {
@@ -127,7 +132,8 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '');
+      const instructions = routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+        + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -153,6 +159,11 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           [`mcp_servers.${ROOM_MESSAGE_SERVER}`]: rooms ? { url: rooms.url, http_headers: rooms.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['room_messages'],
             tools: { room_messages: { approval_mode: 'approve' } },
+          } : disabledMcp,
+          // Read-only GET under human-configured URL prefixes; no approval needed.
+          [`mcp_servers.${FETCH_SERVER}`]: web ? { url: web.url, http_headers: web.headers,
+            required: true, enabled: true, enabled_tools: ['fetch'],
+            tools: { fetch: { approval_mode: 'approve' } },
           } : disabledMcp,
         },
       };
@@ -194,6 +205,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       mediaLifetime.abort();
       await media?.close();
       await rooms?.close();
+      await web?.close();
       await progress.catch(() => {});
       await background?.close(); await publication?.close();
       current.ready.resolve();
