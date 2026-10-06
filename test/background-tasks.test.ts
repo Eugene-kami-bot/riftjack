@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, utimesSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
@@ -23,6 +23,81 @@ function setup(t: { after(fn: () => void): void }) {
   return { root, file, status, queue: new BackgroundTasks(file, root) };
 }
 const report = (error: unknown) => { throw error; };
+
+test('recurring reminders survive downtime and restart without replaying or catching up missed runs', async t => {
+  const f = setup(t);
+  const input = { action: 'remind', label: 'Daily', message: 'Check project updates.', deliver: 'agent',
+    schedule: { frequency: 'daily', time: '09:00', timezone: 'Europe/London' } };
+  const registered = JSON.parse(f.queue.action(input, target, signal()));
+  const now = Date.parse(registered.due) + 4 * 86_400_000;
+  const ids: string[] = [];
+  const options = { valid: () => true, report, deliver: async (_t: BackgroundTarget, e: MatrixEvent, admit: () => void) => {
+    admit(); ids.push(e.event_id!); return true;
+  } };
+  await f.queue.pump(options, now);
+  let queue = new BackgroundTasks(f.file, f.root);
+  await queue.pump(options, now);
+  const saved = JSON.parse(queue.action({ action: 'list' }, target, signal()))[0];
+  assert.equal(ids.length, 1); assert.equal(saved.id, registered.id);
+  assert.equal(saved.state, 'waiting'); assert.equal(saved.lastRun.state, 'delivered');
+  assert.ok(Date.parse(saved.due) > now);
+  await queue.pump(options, Date.parse(saved.due));
+  assert.equal(ids.length, 2); assert.notEqual(ids[0], ids[1]);
+  queue.action({ action: 'cancel', id: registered.id }, target, signal());
+  queue = new BackgroundTasks(f.file, f.root);
+  await queue.pump(options, now + 10 * 86_400_000);
+  assert.equal(ids.length, 2);
+});
+
+test('recurring reminders advance before admission and retain future runs after uncertain delivery', async t => {
+  const f = setup(t);
+  const registered = JSON.parse(f.queue.action({ action: 'remind', label: 'Weekly', message: 'Check', deliver: 'room',
+    schedule: { frequency: 'weekly', weekday: 1, time: '09:00', timezone: 'UTC' } }, target, signal()));
+  const due = Date.parse(registered.due);
+  await f.queue.pump({ valid: () => true, report, deliver: async () => false, post: async () => false }, due);
+  assert.equal(JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0].due, registered.due);
+  let recovered: BackgroundTasks | undefined;
+  await f.queue.pump({ valid: () => true, report: () => {}, deliver: async () => false,
+    post: async (_t, _text, admit) => { admit(); recovered = new BackgroundTasks(f.file, f.root); throw new Error('Uncertain send'); } }, due);
+  const saved = JSON.parse(recovered!.action({ action: 'list' }, target, signal()))[0];
+  assert.equal(saved.lastRun.state, 'interrupted'); assert.equal(saved.state, 'waiting');
+  assert.match(recovered!.summary(target.key, target.session), /1 interrupted/);
+  assert.ok(Date.parse(saved.due) > due);
+  await recovered!.pump({ valid: () => true, report, deliver: async () => assert.fail('No replay'), post: async () => assert.fail('No replay') }, due);
+  await recovered!.pump({ valid: () => false, report, deliver: async () => assert.fail('Revoked schedule') }, Date.parse(saved.due));
+  assert.equal(JSON.parse(recovered!.action({ action: 'list' }, target, signal()))[0].state, 'cancelled');
+});
+
+test('recurring reminders reject mixed timing forms and invalid persisted schedules', t => {
+  const f = setup(t);
+  const input = { action: 'remind', label: 'Daily', message: 'Check', deliver: 'agent',
+    schedule: { frequency: 'daily', time: '09:00', timezone: 'UTC' } };
+  for (const extra of [{ delay_minutes: 1 }, { at: new Date(Date.now() + 60_000).toISOString() },
+    { schedule: { ...input.schedule, timezone: 'Invalid/Zone' } }, { schedule: { ...input.schedule, weekday: 2 } }]) {
+    assert.throws(() => f.queue.action({ ...input, ...extra }, target, signal()), /Use remind/);
+  }
+  f.queue.action(input, target, signal());
+  const data = JSON.parse(readFileSync(f.file, 'utf8'));
+  data.watches[0].timer.schedule.timezone = 'Invalid/Zone';
+  writeFileSync(f.file, JSON.stringify(data));
+  assert.throws(() => new BackgroundTasks(f.file, f.root), /Invalid background/);
+});
+
+test('cancelling a recurring reminder during delivery stops future runs', async t => {
+  const f = setup(t);
+  const registered = JSON.parse(f.queue.action({ action: 'remind', label: 'Daily', message: 'Check', deliver: 'agent',
+    schedule: { frequency: 'daily', time: '09:00', timezone: 'UTC' } }, target, signal()));
+  let calls = 0;
+  const options = { valid: () => true, report, deliver: async (_t: BackgroundTarget, _e: MatrixEvent, admit: () => void) => {
+    admit(); calls++;
+    assert.equal(JSON.parse(f.queue.action({ action: 'cancel', id: registered.id }, target, signal())).state, 'cancelled');
+    return true;
+  } };
+  await f.queue.pump(options, Date.parse(registered.due));
+  await f.queue.pump(options, Date.parse(registered.due) + 3 * 86_400_000);
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0].state, 'cancelled');
+});
 
 test('watches survive restart and dispatch a terminal result only once to the bound thread', async t => {
   const f = setup(t);

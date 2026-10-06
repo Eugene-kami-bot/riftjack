@@ -100,8 +100,10 @@ for (const [stderr, expected] of [
 ] as const) test('SSH failure is actionable and sanitized: ' + expected, async t => {
   const f = fake(t, `console.error(${JSON.stringify(stderr)}); process.exit(255);`);
   f.tunnel.start();
-  await assert.rejects(f.tunnel.waitUntilReady(undefined, 450), expected);
+  const deadline = Date.now() + 3000;
+  while (!f.messages.length && Date.now() < deadline) await delay(20);
   assert.ok(f.messages.length > 0);
+  await assert.rejects(f.tunnel.waitUntilReady(undefined, 0), expected);
   assert.doesNotMatch(f.messages.join('\n'), /secret-token|private-key-path|private-detail/);
 });
 

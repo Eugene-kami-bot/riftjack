@@ -138,8 +138,9 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
         serviceTier: config.codexServiceTier,
-        // Configure new threads; resumed histories also need an explicit update below.
-        developerInstructions: instructions,
+        // New threads need their initial developer message. Resumed threads already
+        // contain it; changed instructions are persisted explicitly below.
+        ...(!saved && { developerInstructions: instructions }),
         config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
           [`mcp_servers.${PUBLISH_SERVER}`]: publication ? { url: publication.url, http_headers: publication.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['prepare_publish'],

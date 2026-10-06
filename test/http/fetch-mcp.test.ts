@@ -73,10 +73,13 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
  if(method==='initialize') reply({});
  if(method==='account/read') reply({account:{type:'chatgpt'}});
  if(method==='thread/start'||method==='thread/resume'){
+  const saved=__filename+'.instructions-'+(p.threadId||'s');
+  if(p.developerInstructions!==undefined) fs.writeFileSync(saved,p.developerInstructions);
+  const instructions=fs.existsSync(saved)?fs.readFileSync(saved,'utf8'):'';
   const c=p.config['mcp_servers.riftjack_fetch'];
   const on=c&&c.enabled!==false;
   record({connection:on?{url:c.url,headers:c.http_headers}:null,enabled:!!on,policy:on?[c.required,c.enabled_tools.join(),c.tools.fetch.approval_mode].join():null,
-   instructions:p.developerInstructions.includes('fetch MCP tool'),tools:on?await listed({url:c.url,headers:c.http_headers}):null});
+   instructions:instructions.includes('fetch MCP tool'),tools:on?await listed({url:c.url,headers:c.http_headers}):null});
   reply({thread:{id:'s'}});
  }
  if(method==='thread/inject_items') reply({});

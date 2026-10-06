@@ -71,6 +71,22 @@ delivers an agent reminder after its current task. A timer delivered more than a
 minute late, for example after the connector was stopped, says when it was due and
 how late it is. A crash during delivery is never replayed.
 
+For a recurring reminder, use `schedule` instead of `at` or `delay_minutes`:
+
+```json
+{"action":"remind","label":"Daily check","message":"Check for useful project updates.","deliver":"agent","schedule":{"frequency":"daily","time":"09:00","timezone":"Europe/London"}}
+```
+
+Weekly schedules also require `weekday` (Monday=1 through Sunday=7).
+Recurrence uses the named timezone's local clock, including daylight saving
+changes. A nonexistent local time is skipped; a repeated local time fires only
+at its first occurrence. After downtime, one overdue reminder is delivered and
+the next occurrence is scheduled in the future. The connector persists that next
+occurrence before admitting delivery, so a failed or interrupted run does not
+break the schedule or replay that run. `list` shows the stable schedule ID, next
+due time and last delivery state; `cancel` stops future occurrences. Resetting
+the conversation or revoking access cancels the schedule.
+
 Have the background process write a terminal state on both success and failure.
 Prefer writing a temporary file and renaming it over the status file. The selected
 field must be a top-level string; the JSON file must be a regular file of at most

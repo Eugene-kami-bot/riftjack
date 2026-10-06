@@ -45,6 +45,20 @@ test('background MCP advertises and schedules delayed messages', async t => {
   assert.deepEqual([scheduled.room, scheduled.message, scheduled.state], ['!room:test', 'Check the build.', 'waiting']);
   const listed = JSON.parse((await call(3, 'tools/call', { name: 'background_tasks', arguments: { action: 'list' } })).result.content[0].text);
   assert.deepEqual(listed.map((w: { id: string; kind: string }) => [w.id, w.kind]), [[scheduled.id, 'timer']]);
+  const schedule = { frequency: 'daily', time: '09:00', timezone: 'UTC' };
+  const recurring = JSON.parse((await call(4, 'tools/call', { name: 'background_tasks',
+    arguments: { action: 'remind', label: 'Daily', message: 'Check project updates.', deliver: 'room', schedule } })).result.content[0].text);
+  assert.deepEqual(recurring.schedule, schedule);
+  const posts: string[] = [];
+  await queue.pump({ valid: () => true, report: error => { throw error; }, deliver: async () => false,
+    post: async (_t, message, admit) => { admit(); posts.push(message); return true; } }, Date.parse(recurring.due));
+  const after = JSON.parse((await call(5, 'tools/call', { name: 'background_tasks', arguments: { action: 'list' } })).result.content[0].text);
+  const saved = after.find((w: { id: string }) => w.id === recurring.id);
+  assert.equal(saved.state, 'waiting'); assert.equal(saved.lastRun.state, 'delivered');
+  assert.ok(Date.parse(saved.due) > Date.parse(recurring.due));
+  assert.ok(posts.includes('Check project updates.'));
+  const cancelled = JSON.parse((await call(6, 'tools/call', { name: 'background_tasks', arguments: { action: 'cancel', id: recurring.id } })).result.content[0].text);
+  assert.equal(cancelled.state, 'cancelled');
 });
 
 for (const kind of ['codex', 'claude'] as const) test(`${kind} registers through MCP and resumes the same session after completion`, { timeout: 20_000 }, async t => {

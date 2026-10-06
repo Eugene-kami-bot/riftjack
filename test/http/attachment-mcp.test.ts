@@ -96,7 +96,9 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
  if(method==='thread/start'||method==='thread/resume'){
   const c=p.config['mcp_servers.riftjack_attachments'];
   if(!c.required||c.tool_timeout_sec!==86400||c.enabled_tools.join()!=='send_attachments'||c.tools.send_attachments.approval_mode!=='approve') throw Error('Tool policy');
-  connection={url:c.url,headers:c.http_headers};instructions=p.developerInstructions;
+  connection={url:c.url,headers:c.http_headers};
+  if(p.developerInstructions!==undefined){instructions=p.developerInstructions;fs.writeFileSync(__filename+'.instructions',instructions);}
+  else instructions=fs.readFileSync(__filename+'.instructions','utf8');
   reply({thread:{id:'same-session'}});
  }
  if(method==='thread/inject_items') reply({});

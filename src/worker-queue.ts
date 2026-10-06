@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { MatrixEvent } from './bridge.js';
+import type { IncomingAttachment } from './media.js';
 
 export class WorkerError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -14,6 +15,7 @@ export type WorkerTask = {
   lease?: string; leaseUntil?: number; attempt: number;
   response?: { text: string; files: WorkerFile[] };
   delivery?: { events: unknown[]; next: number };
+  attachment?: IncomingAttachment;
 };
 
 // One database per bot; only the connector opens it. A committed enqueue precedes
@@ -68,6 +70,10 @@ export class WorkerQueue {
   }
   renew(id: string, lease: string): WorkerTask {
     const task = this.checkLease(id, lease); task.leaseUntil = this.now() + this.leaseMs; this.save(task); return task;
+  }
+  cacheAttachment(id: string, lease: string, attachment: IncomingAttachment) {
+    const task = this.checkLease(id, lease);
+    task.attachment = attachment; this.save(task);
   }
   release(id: string, lease: string) {
     const task = this.checkLease(id, lease); task.status = 'queued'; delete task.lease; delete task.leaseUntil; this.save(task);
