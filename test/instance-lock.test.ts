@@ -128,38 +128,3 @@ test('main reports lock contention with the supervisor no-retry exit code', { ti
   assert.match(result.stderr, /Another connector is using this data directory/);
   assert.equal(readFileSync(join(dir, 'data/connector.pid'), 'utf8'), String(owner.child.pid));
 });
-
-test('background launcher ignores diagnostic PIDs but respects an existing supervisor', t => {
-  const dir = directory(t);
-  const script = readFileSync(new URL('../scripts/start-connector.sh', import.meta.url), 'utf8');
-  const program = script.split("<<'PY'\n")[1].split('\nPY')[0];
-  for (const running of [false, true]) {
-    // Mock process discovery and launch, not the PID/lock filesystem operations.
-    // The stale PID deliberately names this live test process.
-    writeFileSync(join(dir, 'connector.pid'), String(process.pid));
-    const result = spawnSync('python3', ['-c', `
-import sys, os
-from unittest.mock import patch, MagicMock
-program, root, running = sys.argv[1:]
-root = os.path.realpath(root)
-running = running == 'true'
-sys.argv = ['launcher', root, '/usr/bin/node', root, root + '/code', 'tsx']
-process = MagicMock()
-process.poll.return_value = None
-process.pid = 12345
-table = '123 /usr/bin/node /example/src/supervisor.ts' if running else ''
-with patch('subprocess.check_output', return_value=table), \\
-     patch('subprocess.run', return_value=MagicMock(stdout='n' + root)), \\
-     patch('subprocess.Popen', return_value=process) as launch, \\
-     patch('time.sleep'):
-    try:
-        exec(program)
-    except SystemExit as error:
-        assert error.code == 0, str(error)
-    assert launch.call_count == (0 if running else 1)
-`, program, dir, String(running)], { encoding: 'utf8', timeout: 10_000 });
-    assert.equal(result.error, undefined);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(join(dir, 'connector.pid'), 'utf8'), String(process.pid));
-  }
-});

@@ -17,6 +17,9 @@ if (home === code || !existsSync(join(home, '.env'))) {
 // The supervisor never reads .env itself: each connector it starts loads the current file.
 const args = [...(entry === 'main' ? ['--env-file-if-exists=.env'] : []), '--import', fileURLToPath(import.meta.resolve('tsx')),
   fileURLToPath(new URL(`../src/${entry}.ts`, import.meta.url)), ...rest];
-const child = spawn(process.execPath, args, { cwd: home, stdio: 'inherit' });
+const child = entry === 'supervisor'
+  ? spawn('sh', [join(code, 'scripts/start-connector.sh'), '--foreground'],
+    { cwd: home, stdio: 'inherit', env: { ...process.env, RIFTJACK_HOME: home } })
+  : spawn(process.execPath, args, { cwd: home, stdio: 'inherit' });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
 child.on('close', (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });

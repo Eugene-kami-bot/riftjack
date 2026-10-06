@@ -19,7 +19,7 @@ To run updated code, update the checkout in `riftjack/`, install dependencies if
 
 ## Accounts and first startup
 
-Requires Node.js 24+, your Synapse server, and at least one engine: Codex with a ChatGPT login or Claude Code with a Claude login. Either engine is sufficient; the other provider’s account is not required. A [Grok worker](grok.md) is another option and requires neither CLI. Set `MATRIX_HOMESERVER` to your own server; `https://matrix.example.org` in the template is a placeholder. No OpenAI API key is needed.
+Requires Node.js 24+, Python 3, `lsof`, your Synapse server, and at least one engine: Codex with a ChatGPT login or Claude Code with a Claude login. Either engine is sufficient; the other provider’s account is not required. A [Grok worker](grok.md) is another option and requires neither CLI. Set `MATRIX_HOMESERVER` to your own server; `https://matrix.example.org` in the template is a placeholder. No OpenAI API key is needed.
 
 1. From the instance directory, run `cp riftjack/.env.example .env` and `chmod 600 .env`. Keep this file outside the Git repository. Fill in:
    - `MATRIX_HOMESERVER`: your actual HTTPS Matrix server URL.
