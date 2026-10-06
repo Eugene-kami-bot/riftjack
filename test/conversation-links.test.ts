@@ -1,3 +1,4 @@
+import { routingInstructions } from '../src/routing-instructions.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -14,6 +15,24 @@ const home = '!home:test', group = '!group:test';
 const message = (body: string, id = '$1', sender = human): MatrixEvent => ({ type: 'm.room.message',
   sender, event_id: id, origin_server_ts: 2000, content: { msgtype: 'm.text', body } });
 const canonical = sessionKey(home, message(''));
+
+test('ordinary routing carries only current context and omits unchanged rules and empty observations', t => {
+  const f = fixture(t);
+  for (const steering of [false, true]) {
+    const prompt = f.links.prompt(bot, home, message('Hello'), 'Hello', steering);
+    const context = JSON.parse(prompt.split('\n')[1]);
+    assert.deepEqual(context, { room: home, visibility: 'private', human, author: human, trigger: 'human-message' });
+    assert.ok(prompt.endsWith('Current human message:\nHello'));
+    assert.doesNotMatch(prompt, /Matrix routing rules|matrix-mentions|unreadSharedMessages|remainingMessages/);
+    assert.ok(prompt.length < 300);
+  }
+  // A shared turn in the same session is explicit, even after a private turn or compaction.
+  const shared = JSON.parse(f.links.prompt(bot, group, message('Hello'), 'Hello').split('\n')[1]);
+  assert.equal(shared.visibility, 'shared');
+  assert.equal(shared.room, group);
+  assert.deepEqual(shared.participants, [human, bot, peer]);
+  assert.equal(shared.peerCredit, 0);
+});
 
 test('already-delivered status survives pruning and restart and distinguishes observations from quotes', t => {
   for (const quoted of [false, true]) {
@@ -244,7 +263,7 @@ test('agent observations persist, do not become instructions or cross-room steer
   const prompt = resumed.prompt(bot, group, message('Next', '$next'), 'Next');
   assert.equal(prompt.split('A shared finding').length - 1, 1);
   assert.ok(!prompt.includes('Private detail'));
-  assert.match(prompt, /not new instructions or approvals/);
+  assert.match(routingInstructions, /not new instructions or approvals/);
   assert.match(resumed.prompt(bot, home, message('Next'), 'Next'), /A shared finding/);
   assert.ok(!resumed.prompt(bot, home, message('Update'), 'Update', true).includes('A shared finding'));
   const targeted = message('For the reviewer'); targeted.content!['m.mentions'] = { user_ids: [peer] };
@@ -277,13 +296,13 @@ test('unread batches have independent durable cursors and never discard an overs
   assert.equal(first.unreadSharedMessages[0].body + rest.unreadSharedMessages[0].body, long);
   assert.equal(rest.unreadSharedMessages[1].body, 'AFTER');
   links.acknowledge(bot);
-  assert.equal(context(bot).unreadSharedMessages.length, 0);
+  assert.equal(context(bot).unreadSharedMessages, undefined);
   assert.equal(context(peer).unreadSharedMessages[0].offset, 0);
   links.acknowledge(peer);
   context(peer); links.acknowledge(peer);
   // Duplicate Matrix delivery after pruning cannot resurrect an old observation.
   links.observe(bot, group, message(long, '$long', peer));
-  assert.equal(context(bot).unreadSharedMessages.length, 0);
+  assert.equal(context(bot).unreadSharedMessages, undefined);
 });
 
 test('pending human messages are batched by conversation without consuming the next room or overflow', t => {
@@ -480,7 +499,7 @@ test('explicit peer mentions start a durable connector notice paid with peer cre
   assert.equal(context.trigger, 'agent-mention');
   assert.match(links.prompt(bot, group, first, first.content!.body!), /Current connector notice:\n[^]*NO_REPLY/);
   assert.equal(context.peerCredit, PEER_CREDIT - 1);
-  assert.match(links.prompt(bot, group, message('Hi', '$h3'), 'Hi'), /matrix-mentions/);
+  assert.match(routingInstructions, /matrix-mentions/);
   assert.ok(!links.prompt(bot, home, message('Hi', '$h4'), 'Hi').includes('matrix-mentions'));
 });
 
@@ -665,13 +684,13 @@ test('an outgoing reply with a mention block starts the peer turn after attachme
   assert.equal(context.trigger, 'agent-mention');
   // The question arrives quoted in the notice, not again as an observation.
   assert.match(peerPrompts[0], /Current connector notice:[^]*Please review\./);
-  assert.ok(!context.unreadSharedMessages.some((m: { id: string }) => m.id === reply.event_id));
+  assert.ok(!(context.unreadSharedMessages ?? []).some((m: { id: string }) => m.id === reply.event_id));
   // An agent is not sent its own messages back.
   f.links.acknowledge(peer);
   f.links.observe(peer, group, message('Own reply', '$own', peer));
   const next = JSON.parse(f.links.prompt(peer, group, message('Next', '$h2'), 'Next').split('\n')[1]);
-  assert.deepEqual(next.unreadSharedMessages, []);
-  assert.equal(next.remainingMessages, 0);
+  assert.equal(next.unreadSharedMessages, undefined);
+  assert.equal(next.remainingMessages, undefined);
 });
 
 test('mentions trigger once per recipient in any delivery order and carry the whole question', t => {
@@ -698,7 +717,7 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
   // The quoted parts are not delivered a second time as observations.
   f.links.acknowledge(bot);
   const next = JSON.parse(f.links.prompt(bot, group, message('Next', '$h2'), 'Next').split('\n')[1]);
-  assert.ok(!next.unreadSharedMessages.some((m: { id: string }) => m.id === '$part1' || m.id === '$part2'));
+  assert.ok(!(next.unreadSharedMessages ?? []).some((m: { id: string }) => m.id === '$part1' || m.id === '$part2'));
   // Reply IDs group parts internally and are not shown to agents.
   assert.ok(next.unreadSharedMessages.length > 0);
   assert.ok(next.unreadSharedMessages.every((m: object) => !('reply' in m)));
@@ -727,7 +746,7 @@ test('an agent may decline a shared-room human message with NO_REPLY, but not a 
   assert.equal(replies.length, 0);
   await bridge.handle(home, message('Hello', '$private'));
   assert.deepEqual(replies, [[home, '…'], [home, 'NO_REPLY']]);
-  assert.match(f.links.prompt(bot, group, message('Hi', '$h'), 'Hi'), /exactly NO_REPLY/);
+  assert.match(routingInstructions, /Only in shared rooms:[^]*exactly NO_REPLY/);
   // Declining drops only the text: attachments are still delivered.
   const sent: string[] = [];
   const withFile = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,

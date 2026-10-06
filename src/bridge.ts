@@ -1,4 +1,5 @@
 import type { BackgroundAction } from './background-tasks.js';
+import type { CompactionPhase } from './compaction-notices.js';
 import { roomMessageDelivery, type MessageRequest } from './room-messages.js';
 import type { ToolAction } from './tool-mcp.js';
 import type { SendAttachments } from './attachment-delivery.js';
@@ -30,7 +31,7 @@ export type MatrixEvent = {
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: ToolAction };
+export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: ToolAction };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -55,6 +56,7 @@ type Options = {
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
+  compaction?: (phase: CompactionPhase, context: { room: string; sender: string }) => Promise<void>;
   linkedSession?: (room: string, event: MatrixEvent) => string;
   decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
   promptDelivered?: () => void;
@@ -328,6 +330,14 @@ export class Bridge {
         const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
           o.roomMessages!(request, { room, event: requestEvent, key: backendKey }, signal));
         const hooks: BackendHooks = {
+          compaction: o.compaction ? async phase => {
+            try {
+              // Unlike progress, an interrupted-compaction notice is useful after
+              // cancellation too. The destination rechecks access independently.
+              if (!o.isAuthorized(current.sender)) return;
+              await o.compaction!(phase, { room, sender: current.sender });
+            } catch (error) { o.report(error); }
+          } : undefined,
           roomMessages: messages ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();

@@ -1,4 +1,5 @@
 import { linkedRoomMessages } from './room-messages.js';
+import { sendCompactionNotice } from './compaction-notices.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
@@ -242,6 +243,14 @@ async function main() {
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
+      compaction: (phase, { room, sender }) => sendCompactionNotice(phase,
+        linkedAgent?.home ?? room, {
+          // Use the strict two-person check here, not privateRoom which also
+          // authorizes linked shared rooms. No fallback to a shared destination.
+          allowed: target => isPrivateRoom(client, target, account.userId, sender, authorized),
+          stopping: () => stopping,
+          send: (target, content) => client.sendMessage(target, content),
+        }),
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,

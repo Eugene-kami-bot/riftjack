@@ -829,3 +829,19 @@ test('reviewed publication rejects unauthorized callers, malformed requests, and
   assert.match(f.replies.at(-1)!, /No pending confirmation/);
   assert.equal(confirmed, false);
 });
+
+test('compaction service hook uses the human identity, and delivery failure does not stop the task', async t => {
+  const notices: unknown[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.compaction!('started');
+    await hooks!.compaction!('completed');
+    return 'answer';
+  }, true, { compaction: async (phase, context) => {
+    notices.push({ phase, context });
+    if (phase === 'started') throw new Error('Delivery failed');
+  } });
+  await f.bridge.handle('!dm:test', event());
+  assert.deepEqual(notices, ['started', 'completed'].map(phase => ({ phase, context: { room: '!dm:test', sender: '@owner:test' } })));
+  assert.equal(f.errors.length, 1);
+  assert.equal(f.replies.at(-1), 'answer');
+});

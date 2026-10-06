@@ -53,3 +53,35 @@ node --import tsx scripts/benchmark-media.mts buffered /absolute/path/test.bin /
 ```
 
 Each command runs a separate Node process with a loopback HTTP receiver and verifies the received ciphertext hash. The report records elapsed time and kernel peak RSS, including the receiver. `buffered` reproduces the former whole-file encryption and SDK upload for comparison. These measurements do not include a Matrix homeserver or recipient download. Benchmark inputs and result files are local data; keep them outside the checkout.
+
+## Routing context
+
+Stable Matrix routing rules live in `routing-instructions.ts`. Codex receives them
+as developer instructions on thread start and resume; the existing instruction
+hash also updates older sessions once. Claude receives them through
+`--append-system-prompt` on every process start, including resume. When the CLI
+advertises `--system-prompt-snapshot`, the backend sets it to `off` so an old
+snapshot cannot silently override updated connector instructions. They are not
+copies in successive user messages and do not rely solely on a history summary.
+Each routed message still identifies its current room, visibility, author and
+trigger, including live steering. Shared participants and credit, unread messages
+and connector notes are included when applicable; empty observation fields are omitted.
+
+Backend tests verify instruction delivery on start and resume, not the model's
+compaction implementation. A live compaction check must use a disposable session,
+never an active user's conversation.
+## Context compaction notices
+
+Codex `contextCompaction` item lifecycle events and Claude `compacting` status /
+`compact_boundary` stream events produce service notices in the human's encrypted
+DM with that bot. Linked shared conversations use the linked home DM. The
+destination must still have exactly the bot and the human; there is no fallback
+to the shared room. Notices contain no conversation content and do not trigger
+agent turns or mentions.
+
+Repeated starts/completions are suppressed within a backend call. Only an
+observed completion is reported as successful; a run ending while compaction is
+pending reports that completion was not confirmed. A hard connector crash cannot
+send that final notice. Delivery failures are reported without interrupting the
+agent, and uncertain sends are not retried. These notifications do not yet ask
+the agent to save or reload memory.

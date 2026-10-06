@@ -1,3 +1,4 @@
+import { routingInstructions } from '../src/routing-instructions.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, realpathSync, readFileSync, rmSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
@@ -71,6 +72,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress', items: [] } } });
     const begin = () => {
       respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
+      if (prompt.includes('[compact]')) {
+        const item = { id: 'compact-1', type: 'contextCompaction' };
+        send({ method: 'item/started', params: { threadId: 'other-thread', turnId, item } });
+        send({ method: 'item/started', params: { threadId, turnId: 'other-turn', item } });
+        for (let i = 0; i < 2; i++) send({ method: 'item/started', params: { threadId, turnId, item } });
+        if (prompt.includes('[unfinished]')) return complete('', 'failed');
+        for (let i = 0; i < 2; i++) send({ method: 'item/completed', params: { threadId, turnId, item } });
+      }
       if (prompt.includes('[fail]')) return complete('', 'failed');
       if (prompt.includes('[wait]')) return;
       if (prompt.includes('[approval]')) return send({ id: 999, method: 'item/commandExecution/requestApproval', params: {} });
@@ -244,6 +253,7 @@ test('connector instructions are Codex developer instructions, not part of the u
   await f.backend('codex', 'hello', 'key', signal(), '@owner:test');
   assert.match(f.calls().find(c => c.method === 'thread/start').params.developerInstructions, /conversation's outbox: ".*outbox"/);
   assert.ok(f.calls().find(c => c.method === 'thread/start').params.developerInstructions.includes(approvalInstructions('codex')));
+  assert.ok(f.calls().find(c => c.method === 'thread/start').params.developerInstructions.includes(routingInstructions));
   assert.equal(f.calls().find(c => c.method === 'turn/start').params.input[0].text, 'hello');
 });
 
@@ -256,9 +266,13 @@ test('existing Codex sessions receive approval judgment instructions once before
   assert.ok(injected >= 0 && injected < calls.findIndex(c => c.method === 'turn/start'));
   assert.equal(calls[injected].params.items[0].role, 'developer');
   assert.ok(calls[injected].params.items[0].content[0].text.includes(approvalInstructions('codex')));
+  assert.ok(calls[injected].params.items[0].content[0].text.includes(routingInstructions));
   assert.equal(calls.find(c => c.method === 'thread/resume').params.threadId, 'thread_1');
   await f.backend('codex', 'again', 'key', signal(), '@owner:test');
   assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
+  for (const call of f.calls().filter(c => c.method === 'thread/resume')) {
+    assert.ok(call.params.developerInstructions.includes(routingInstructions));
+  }
 });
 
 test('resuming a Codex conversation explicitly refreshes the attachment limit', async t => {
@@ -803,4 +817,12 @@ test('Codex snapshots dynamic settings per task and refreshes them on resume', a
   const turn = f.calls().filter(c => c.method === 'turn/start').at(-1).params;
   assert.equal(turn.model, 'second-model'); assert.equal(turn.effort, 'medium'); assert.equal(turn.serviceTier, 'default');
   assert.equal(f.state.session('dynamic').codex, 'thread_1');
+});
+
+for (const unfinished of [false, true]) test(`Codex compaction notifications, unfinished=${unfinished}`, async t => {
+  const f = setup(t), phases: string[] = [];
+  const task = f.backend('codex', '[compact]' + (unfinished ? '[unfinished]' : ''), 'key', signal(), '@owner:test', [], undefined, undefined,
+    { compaction: async phase => { phases.push(phase); } });
+  if (unfinished) await assert.rejects(task, /task failed/); else await task;
+  assert.deepEqual(phases, ['started', unfinished ? 'unconfirmed' : 'completed']);
 });

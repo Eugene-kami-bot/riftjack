@@ -1,3 +1,5 @@
+import { routingInstructions } from './routing-instructions.js';
+import { compactionNotices } from './compaction-notices.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
@@ -107,7 +109,7 @@ async function capture(config: Config, args: string[], signal: AbortSignal): Pro
 
 // Returns whether the CLI can acknowledge user messages written during a turn
 // (--replay-user-messages), which live steering requires.
-export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<{ replay: boolean }> {
+export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<{ replay: boolean; systemPromptSnapshot: boolean }> {
   const checkSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
   const help = await capture(config, ['--help'], checkSignal);
   for (const flag of ['--input-format', '--output-format', '--permission-mode', '--permission-prompt-tool', '--append-system-prompt', '--tools', '--settings', '--resume']) {
@@ -122,7 +124,7 @@ export async function checkClaude(config: Config, signal = AbortSignal.timeout(1
   if (status?.loggedIn !== true || status.authMethod !== 'claude.ai') {
     throw new PublicError('Sign in to Claude Code with your Claude account on the host (claude auth login). This connector does not use Anthropic API keys.');
   }
-  return { replay: help.includes('--replay-user-messages') };
+  return { replay: help.includes('--replay-user-messages'), systemPromptSnapshot: help.includes('--system-prompt-snapshot') };
 }
 
 // Read-only bots never ask: an approval could otherwise grant writes.
@@ -149,7 +151,7 @@ export function claudeApprovals(config: Config): boolean {
 }
 
 export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection,
-  replay = false): string[] {
+  replay = false, systemPromptSnapshot = false): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -175,7 +177,11 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   if (interactive) args.push('--permission-prompt-tool', 'stdio');
   if (config.claudeModel) args.push('--model', config.claudeModel);
   // Connector instructions belong in the system prompt, not in every user message of the history.
-  if (instructions) args.push('--append-system-prompt', instructions);
+  if (instructions) {
+    args.push('--append-system-prompt', instructions);
+    // Newer CLI versions otherwise reuse the first system prompt even on resume.
+    if (systemPromptSnapshot) args.push('--system-prompt-snapshot', 'off');
+  }
   if (session) args.push('--resume', session);
   // Echoes user messages from stdin with their UUID once Claude consumes them.
   if (replay) args.push('--replay-user-messages');
@@ -202,7 +208,7 @@ async function claudeMessage(prompt: string, attachments: IncomingAttachment[], 
 export function createClaudeBackend(configuration: Config | (() => Config), state: State): Backend & { steer: Steer } {
   // Each check spawns two Claude processes. Re-check only at first use and after a failed task,
   // so a logout or downgrade still gets an actionable message on the next attempt.
-  let checked = false, replay = false;
+  let checked = false, replay = false, systemPromptSnapshot = false;
   // Live steering into the running turn of each conversation key.
   const live = new Map<string, (prompt: string, attachments: IncomingAttachment[], signal: AbortSignal) => Promise<boolean>>();
   const run: Backend = async (...args) => {
@@ -212,7 +218,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     const config = { ...(typeof configuration === 'function' ? configuration() : configuration) };
     if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
     signal.throwIfAborted();
-    if (!checked) { replay = (await checkClaude(config, signal)).replay; checked = true; }
+    if (!checked) { ({ replay, systemPromptSnapshot } = await checkClaude(config, signal)); checked = true; }
     const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
     const input = await claudeInput(prompt, attachments, config);
     // An update is confirmed only when Claude echoes its UUID. Without the echo,
@@ -238,6 +244,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     let lastAssistantWasSynthetic = false;
     let pendingProgress = '';
     let progress = Promise.resolve();
+    const compactions = compactionNotices(hooks?.compaction);
+    let compactId = 0, compacting = false;
     const flushProgress = () => {
       if (pendingProgress && hooks?.progress) {
         const text = pendingProgress;
@@ -278,7 +286,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : ''), publication, background, media, rooms, replay), signal, (line, stdin) => {
+        routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : ''), publication, background, media, rooms, replay, systemPromptSnapshot), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -302,6 +310,16 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       if (message.type === 'system' && message.subtype === 'init') {
         state.update(key, { claudeReport: engineReport({ model: message.model, cwd: message.cwd,
           reasoningEffort: message.effort, fastMode: message.fast_mode_state, permissionMode: message.permissionMode }) });
+      }
+      if (message.type === 'system' && !message.parent_tool_use_id) {
+        if (message.subtype === 'status' && message.status === 'compacting') {
+          if (!compacting) { compacting = true; compactions.start(String(++compactId)); }
+        }
+        if (message.subtype === 'compact_boundary' && compacting) {
+          compactions.complete(String(compactId)); compacting = false;
+        }
+        // A null status also occurs for permission-mode changes; it is not
+        // evidence that compaction succeeded. Only compact_boundary is.
       }
       if (message.type === 'control_cancel_request') {
         pending.get(message.request_id)?.abort(); pending.delete(message.request_id);
@@ -360,6 +378,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     }, input, interactive || replay, stdin => { stdinRef = stdin; });
       await progress;
     } finally {
+      await compactions.close();
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
       close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();

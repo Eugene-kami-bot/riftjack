@@ -1,3 +1,5 @@
+import { routingInstructions } from './routing-instructions.js';
+import { compactionNotices } from './compaction-notices.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER } from './attachment-mcp.js';
@@ -61,6 +63,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     signal.addEventListener('abort', abort, { once: true });
     let progress = Promise.resolve();
     const sentProgress = new Set<string>();
+    const compactions = compactionNotices(hooks?.compaction);
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
@@ -85,6 +88,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         const p = notification.params;
         if (p?.threadId !== current.threadId) return;
         if (notification.method === 'turn/started' && p.turn) current.turnId = p.turn.id;
+        if (!current.ended && p.turnId === current.turnId && p.item?.type === 'contextCompaction') {
+          if (notification.method === 'item/started') compactions.start(p.item.id);
+          if (notification.method === 'item/completed') compactions.complete(p.item.id);
+        }
         if ((notification.method === 'item/started' || notification.method === 'item/completed') && p.turnId === current.turnId && p.item) current.items.set(p.item.id, p.item);
         if (notification.method === 'item/completed' && p.turnId === current.turnId && p.item?.type === 'agentMessage') current.messages.set(p.item.id, p.item);
         if (!current.ended && notification.method === 'item/completed' && p.turnId === current.turnId && p.item?.type === 'agentMessage' &&
@@ -120,7 +127,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '');
+      const instructions = routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -183,6 +190,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       return delivery ? delivery.final(reply) : reply;
     } finally {
       current.ended = true;
+      await compactions.close();
       mediaLifetime.abort();
       await media?.close();
       await rooms?.close();
