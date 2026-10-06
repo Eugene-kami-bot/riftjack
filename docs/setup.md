@@ -71,7 +71,7 @@ Normal shutdown and `!restart` stop and reap the managed SSH process before the 
 
 ## Provisioning failures
 
-Bot creation failures are reported in the manager DM and connector log with the failed step, API origin, HTTP status or known network/Matrix error code, and troubleshooting advice. A refused connection to a loopback Admin API includes an SSH tunnel hint. If account creation was attempted before the failure, check Synapse accounts before retrying: the account may exist even though the connector did not save its credentials. Unexpected task errors also include safe codes from nested causes. Raw exception messages, response bodies, request headers, passwords and tokens are not dumped into diagnostics.
+Bot creation failures are reported in the manager DM and connector log with the failed step, API origin, HTTP status or known network/Matrix error code, and troubleshooting advice. A refused connection to a loopback Admin API includes an SSH tunnel hint. If account creation was attempted before the failure, check Synapse accounts before retrying: the account may exist even though the connector did not save its credentials. Unexpected task errors also include safe codes from nested causes. Raw exception messages, response bodies, request headers, passwords and tokens are not dumped into diagnostics. Codex RPC rejections identify the operation and numeric code, for example `Codex App Server rejected thread/resume (RPC -32602).` Report that complete message when troubleshooting; it distinguishes startup, resume and turn failures without exposing server diagnostics. Unknown operation names are shown only as `request`.
 
 ## Codex model settings
 

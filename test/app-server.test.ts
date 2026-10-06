@@ -14,6 +14,7 @@ function fixture(t: { after(fn: () => unknown): void }) {
 const readline = require('node:readline');
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line);
+  if (request.params?.reject) return process.stdout.write(JSON.stringify({ id: request.id, error: { code: request.params.code, message: 'private server diagnostic with a secret' } }) + '\\n');
   if (request.method === 'exit') process.exit(17);
   if (request.method === 'malformed') return process.stdout.write('private diagnostic, not JSON\\n');
   if (request.method === 'initialize') process.stdout.write(JSON.stringify({ id: request.id, result: {} }) + '\\n');
@@ -61,4 +62,22 @@ test('malformed CLI output reports the protocol failure without exposing its con
     assert.doesNotMatch(errorMessage(error), /private diagnostic/);
     return true;
   });
+});
+
+test('RPC rejections identify the operation and code without exposing server diagnostics', async t => {
+  const { server } = fixture(t);
+  await server.initialize();
+  for (const [method, operation] of [['thread/resume', 'thread/resume'], ['thread/start', 'thread/start'],
+    ['turn/start', 'turn/start'], ['private-method-secret', 'request']]) {
+    await assert.rejects(server.request(method, { reject: true, code: -32602, token: 'private-parameter-secret' }), error => {
+      assert.equal(errorMessage(error), `Codex App Server rejected ${operation} (RPC -32602).`);
+      return true;
+    });
+  }
+  // Do not interpolate malformed codes, even when a server puts private text there.
+  await assert.rejects(server.request('turn/start', { reject: true, code: 'private-code-secret' }), error => {
+    assert.equal(errorMessage(error), 'Codex App Server rejected turn/start.');
+    return true;
+  });
+  await server.initialize();
 });

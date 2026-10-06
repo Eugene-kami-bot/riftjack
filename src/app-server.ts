@@ -17,13 +17,13 @@ const operations = new Set(['initialize', 'account/read', 'account/rateLimits/re
 const operationName = (method: string) => operations.has(method) ? method : 'request';
 
 export class RpcError extends PublicError {
-  constructor(readonly code: number, message?: unknown) {
+  constructor(readonly code: number, message?: unknown, method = 'request') {
     // Map only a known server error; never forward arbitrary diagnostics to chat.
     const busy = code === -32600 && typeof message === 'string' &&
       /^thread [a-zA-Z0-9_-]+ already has an active writer$/.test(message);
     super(busy
       ? 'This conversation is already open in another Codex process. Close it in the Codex app or finish the other active session, then retry in Matrix. No conversation reset is needed.'
-      : 'Codex App Server rejected a request.');
+      : `Codex App Server rejected ${operationName(method)}${Number.isSafeInteger(code) ? ` (RPC ${code})` : ''}.`);
   }
 }
 
@@ -31,7 +31,7 @@ export class RpcError extends PublicError {
 export class AppServer {
   private child: ChildProcessWithoutNullStreams;
   private nextId = 0;
-  private pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pending = new Map<number, { method: string; resolve: (result: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private failure?: Error;
   private closing = false;
   private closed: Promise<void>;
@@ -93,7 +93,7 @@ export class AppServer {
           const request = this.pending.get(message.id);
           if (!request) return;
           this.pending.delete(message.id); clearTimeout(request.timer);
-          if (message.error) request.reject(new RpcError(message.error.code, message.error.message));
+          if (message.error) request.reject(new RpcError(message.error.code, message.error.message, request.method));
           else request.resolve(message.result);
         }
       } catch { fail(new PublicError('Could not process a Codex App Server response. Check the installed Codex version.')); }
@@ -117,7 +117,7 @@ export class AppServer {
       const timer = setTimeout(() => {
         this.pending.delete(id); reject(new PublicError(`Codex App Server timed out waiting for ${operationName(method)} after ${Math.ceil(timeoutMs / 1000)} seconds. No automatic retry was made; check the task state before retrying.`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method: operationName(method), resolve, reject, timer });
       this.write({ id, method, params });
     });
   }

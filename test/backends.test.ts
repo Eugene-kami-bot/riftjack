@@ -757,7 +757,7 @@ test('Codex RPC diagnostics expose only recognized actionable messages', async (
   const { RpcError } = await import('../src/app-server.js');
   const { errorMessage } = await import('../src/errors.js');
   for (const message of ['private server diagnostic', 'thread busy_thread already has an active writer\nprivate secret', null]) {
-    assert.equal(errorMessage(new RpcError(-32600, message)), 'Codex App Server rejected a request.');
+    assert.equal(errorMessage(new RpcError(-32600, message)), 'Codex App Server rejected request (RPC -32600).');
   }
 });
 
