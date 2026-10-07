@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const args = process.argv.slice(2), claude = !args.includes('app-server');
 const log = x => fs.appendFileSync(__filename+'.calls', JSON.stringify(x)+'\\n');
 const emit = x => console.log(JSON.stringify(x));
-if (args.includes('--help')) { console.log('--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume --replay-user-messages'); process.exit(0); }
+if (args.includes('--help')) { console.log('--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume --replay-user-messages --include-hook-events'); process.exit(0); }
 if (args[0]==='auth') { emit({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}); process.exit(0); }
 const threadId='session', turnId='turn'; let mode, started=false;
 const usage = foreign => claude
@@ -22,14 +22,34 @@ const complete = () => claude
  ? emit({type:'result',subtype:'success',session_id:threadId,is_error:false,result:'done',modelUsage:{model:{contextWindow:200000}}})
  : emit({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed',items:[{id:'answer',type:'agentMessage',text:'done'}]}}});
 const compact = () => {
- if (claude) { emit({type:'system',subtype:'status',status:'compacting',session_id:threadId});emit({type:'system',subtype:'compact_boundary',session_id:threadId}); }
+ if (claude) {
+  emit({type:'system',subtype:'status',status:'compacting',session_id:threadId});
+  const hook = () => {
+   if(mode.includes('nohook'))return;
+   if(!args.includes('--include-hook-events'))throw Error('Missing hook events flag');
+   const settings=JSON.parse(args[args.indexOf('--settings')+1]);
+   const command=settings.hooks.SessionStart[0].hooks[0].command;
+   const result=require('node:child_process').spawnSync('/bin/sh',['-c',command],{input:JSON.stringify({hook_event_name:'SessionStart',source:'compact',session_id:threadId}),encoding:'utf8'});
+   if(result.status!==0)throw Error(result.stderr);
+   const text=JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+   log({notice:text,delivery:'hook'});
+   emit({type:'system',subtype:'hook_response',hook_event:'SessionStart',exit_code:0,outcome:'success',stdout:result.stdout,session_id:threadId});
+  };
+  if(!mode.includes('after'))hook();
+  emit({type:'system',subtype:'compact_boundary',session_id:threadId});
+  if(mode.includes('after'))hook();
+ }
  else { const item={id:'compact',type:'contextCompaction'};for(const method of ['item/started','item/started','item/completed','item/completed'])emit({method,params:{threadId,turnId,item}}); }
 };
 const update = text => {
  log({notice:text});
  if (text.includes('reported context usage')) {
   usage(false); // repeating high usage must not enqueue another save
-  if (mode.includes('cycle')) {compact();return;}
+  if (mode.includes('cycle')) {
+   compact();
+   if(claude) { emit({type:'assistant',session_id:threadId,message:{model:'model',content:[],usage:{input_tokens:1}}});complete(); }
+   return;
+  }
  }
  complete();
 };
@@ -74,12 +94,22 @@ for (const kind of ['codex', 'claude'] as const) {
     const notes=f.calls().filter(c=>c.notice).map(c=>c.notice);
     assert.equal(notes.length,2);assert.match(notes[0],/reported context usage/);assert.match(notes[1],/compaction completed/);
     assert.equal(f.state.session('key')[kind==='codex'?'codexCheckpoint':'claudeCheckpoint']?.pending,undefined);
+    if(kind==='claude') assert.equal(f.calls().find(c=>c.delivery==='hook')?.notice, notes[1]);
     assert.equal(existsSync(join(f.dir,'.riftjack','checkpoints')),false); // connector never writes the agent's note
+  });
+
+  if (kind === 'claude') test('Claude hook acknowledgement after boundary prevents duplicate stdin reminder', async t => {
+    const f = setup(t);
+    await f.backend(kind, 'cycle-after', 'key', AbortSignal.timeout(5000), '@owner:test');
+    const notes = f.calls().filter(c => c.notice);
+    assert.equal(notes.length, 2);
+    assert.equal(notes[1].delivery, 'hook');
+    assert.equal(f.state.session('key').claudeCheckpoint?.pending, undefined);
   });
 
   test(`${kind}: compaction at turn end is restored on next input, once, after backend recreation`, async t => {
     const f=setup(t);
-    await f.backend(kind,'late','key',AbortSignal.timeout(5000),'@owner:test');
+    await f.backend(kind,kind==='claude'?'late-nohook':'late','key',AbortSignal.timeout(5000),'@owner:test');
     // Depending on the CLI event timing, a live update may already be consumed.
     const field=kind==='codex'?'codexCheckpoint':'claudeCheckpoint';
     const pending=f.state.session('key')[field]?.pending;

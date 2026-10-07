@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { State } from './state.js';
 
 export type CheckpointState = {
@@ -18,6 +19,16 @@ Riftjack may send a continuity notice when reported context usage is high or aft
 const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
 const windowSize = (n: unknown): n is number => count(n) && n > 0;
 
+const restoreTemplate = `Riftjack continuity notice (not a human message): context compaction completed. Before continuing, read your continuity note at CHECKPOINT_PATH if it exists, and follow any relevant memory references within your current permissions. It may be missing or stale; compare it with current instructions and newer messages. Continue the current task; this is not a new human request.`;
+const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+
+// SessionStart(compact) adds context before Claude's next model request. A
+// stream-json compact_boundary event is too late to establish that ordering.
+export function claudeCheckpointHooks(workspace: string) {
+  const command = [process.execPath, fileURLToPath(new URL('./claude-checkpoint-hook.mjs', import.meta.url)), workspace, restoreTemplate].map(quote).join(' ');
+  return { SessionStart: [{ matcher: 'compact', hooks: [{ type: 'command', command, timeout: 5 }] }] };
+}
+
 // No note content is read or written by the unsandboxed connector. The agent
 // accesses its own file using its existing tools and permissions.
 export function contextCheckpoints(state: State, key: string, backend: 'codex' | 'claude', workspace: string, session: string) {
@@ -27,6 +38,7 @@ export function contextCheckpoints(state: State, key: string, backend: 'codex' |
     : { session, generation: 0, warned: false };
   const path = join(workspace, '.riftjack', 'checkpoints', createHash('sha256').update(backend + '\0' + session).digest('hex') + '.md');
   let compacting = false;
+  let restoredByHook = false;
   let lastClaudeInput: number | undefined;
   const persist = () => state.update(key, { [field]: { ...value } });
   return {
@@ -52,19 +64,26 @@ export function contextCheckpoints(state: State, key: string, backend: 'codex' |
       if (windowSize(window) && window !== value.claudeWindow) { value.claudeWindow = window; persist(); }
       this.usage(lastClaudeInput, value.claudeWindow);
     },
-    start() { compacting = true; },
+    start() { compacting = true; restoredByHook = false; },
     complete() {
       if (!compacting) return;
       compacting = false;
       lastClaudeInput = undefined;
-      value.generation++; value.warned = false; value.pending = 'restore'; persist();
+      value.generation++; value.warned = false; value.pending = restoredByHook ? undefined : 'restore'; persist();
+    },
+    restored(text: unknown) {
+      // Hook output can precede or follow compact_boundary. Only exact output
+      // for this session acknowledges delivery; other hooks are unrelated.
+      if (backend !== 'claude' || text !== restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(path))) return;
+      if (compacting) restoredByHook = true;
+      else if (value.pending === 'restore') { value.pending = undefined; persist(); }
     },
     notice() {
       if (!value.pending || compacting) return undefined;
       const id = `${value.generation}:${value.pending}`;
       const text = value.pending === 'save'
         ? `Riftjack continuity notice (not a human message): reported context usage has reached 65% of the reported window. Compaction may occur later. At your next opportunity, save a concise continuity note using your ordinary tools at ${JSON.stringify(path)}. Choose what you want preserved and references to existing memory. If writing is not allowed, respect that limit. Then continue the current task.`
-        : `Riftjack continuity notice (not a human message): context compaction completed. Before continuing, read your continuity note at ${JSON.stringify(path)} if it exists, and follow any relevant memory references within your current permissions. It may be missing or stale; compare it with current instructions and newer messages. Continue the current task; this is not a new human request.`;
+        : restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(path));
       return { id, text };
     },
     delivered(id: string) {

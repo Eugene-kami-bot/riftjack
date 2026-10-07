@@ -3,8 +3,33 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { State } from '../src/state.js';
-import { contextCheckpoints, checkpointDelivery } from '../src/context-checkpoints.js';
+import { contextCheckpoints, checkpointDelivery, claudeCheckpointHooks } from '../src/context-checkpoints.js';
+
+test('Claude compact hook emits the matching session note without reading files or interpreting paths as shell code', t => {
+  const f = setup(t);
+  const workspace = join(f.dir, "space ' quote $HOME `exit 7` $(exit 8)");
+  const hooks = claudeCheckpointHooks(workspace);
+  const hook = hooks.SessionStart[0];
+  assert.equal(hook.matcher, 'compact');
+  assert.equal('async' in hook.hooks[0], false);
+  const run = (input: unknown) => spawnSync('/bin/sh', ['-c', hook.hooks[0].command], {
+    input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', timeout: 5000,
+  });
+  const event = { hook_event_name: 'SessionStart', source: 'compact', session_id: 'session', cwd: '/ignored' };
+  const result = run(event);
+  assert.equal(result.status, 0, result.stderr);
+  const c = contextCheckpoints(f.state, 'hook', 'claude', workspace, event.session_id);
+  c.start(); c.complete();
+  assert.deepEqual(JSON.parse(result.stdout), { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: c.notice()!.text } });
+  for (const update of [{ source: 'resume' }, { source: 'startup' }, { hook_event_name: 'PreCompact' }, { session_id: '../other' }]) {
+    const skipped = run({ ...event, ...update });
+    assert.equal(skipped.status, 0); assert.equal(skipped.stdout, '');
+  }
+  const invalid = run('{private-malformed-input');
+  assert.equal(invalid.status, 1); assert.equal(invalid.stdout, ''); assert.doesNotMatch(invalid.stderr, /private-malformed/);
+});
 
 function setup(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), 'checkpoint-'));
@@ -29,6 +54,18 @@ test('unknown and malformed measurements never produce a warning', t => {
   const c = setup(t).checkpoint;
   for (const [used, size] of [[100, null], [NaN, 200], [100, 0], [-1, 200], [Infinity, 200], [100, '200'], [10.5, 12]]) c.usage(used, size);
   assert.equal(c.notice(), undefined);
+});
+
+test('only matching Claude hook output acknowledges restoration, before or after the boundary', t => {
+  const f = setup(t);
+  const c = contextCheckpoints(f.state, 'claude', 'claude', f.dir, 'session');
+  c.start(); c.complete(); const note = c.notice()!;
+  c.restored('another hook'); assert.deepEqual(c.notice(), note);
+  c.restored(note.text); assert.equal(c.notice(), undefined);
+  c.start(); c.restored(note.text); c.complete(); assert.equal(c.notice(), undefined);
+  c.start(); c.complete(); assert.match(c.notice()!.text, /compaction completed/);
+  const other = contextCheckpoints(f.state, 'other', 'claude', f.dir, 'other-session');
+  other.start(); other.complete(); other.restored(note.text); assert.ok(other.notice());
 });
 
 test('compaction replaces a queued warning and old acknowledgement cannot erase restore', t => {

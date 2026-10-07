@@ -110,11 +110,24 @@ Separate backend/session identifiers give separate paths; resetting a session
 does not adopt the previous session's note. Files remain until the agent or
 human removes them. A shared workspace is not filesystem privacy isolation.
 
-After an observed start/completion pair, the adapter asks the agent to read its
-note if present, check freshness, and resume the existing task. The reminder
-uses live steering (Claude requires replay acknowledgements). If delivery is
-not accepted or is uncertain, it remains pending for the next ordinary input;
-there is no autonomous extra model run or retry loop. State survives connector
-restarts. Replayed completion events alone do not produce a restore reminder.
-An unobserved compaction during a connector crash cannot trigger restoration.
+After compaction, the adapter asks the agent to read its note if present,
+check freshness, and resume the existing task. Claude uses a synchronous
+`SessionStart` hook matching `compact`: its `additionalContext` reaches the
+first model request after compaction. The hook only constructs the note path;
+it does not read memory files or grant permissions. Memory references belong
+in the agent's note, not in connector code. The helper is included in code
+snapshots and runs with the same Node executable as the connector.
+
+An observed start/completion pair also records a pending restore reminder.
+On CLIs advertising `--include-hook-events`, Riftjack requests hook events;
+matching output with exit code zero and outcome `success` clears the reminder.
+Without those events delivery remains uncertain and the fallback may repeat it.
+If hooks are disabled or fail,
+Claude falls back to live steering after the next assistant event (which can
+be later than the first continuation), or the next ordinary input. Codex uses
+live steering, without a first-continuation ordering guarantee. Unaccepted or
+uncertain delivery remains pending; there is no autonomous extra model run or
+retry loop. State survives connector restarts. Replayed completion events
+alone do not enqueue another reminder. Unobserved compaction during a
+connector crash cannot enqueue the fallback reminder.
 The existing human-facing private compaction notices are unchanged.
