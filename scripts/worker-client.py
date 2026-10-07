@@ -47,7 +47,7 @@ def main():
         req = urllib.request.Request(endpoint + path,
             data=None if body is None else json.dumps(body).encode(),
             headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
-        with opener.open(req, timeout=45) as response:
+        with opener.open(req, timeout=650 if args.command == 'attachment' else 45) as response:
             return json.load(response)
 
     if args.command == 'wait':
@@ -71,7 +71,8 @@ def main():
         with output.open('xb') as file:
             os.chmod(output, 0o600)
             file.write(base64.b64decode(result['data'], validate=True))
-        result = {'saved': str(output), 'name': result['name'], 'mimetype': result['mimetype']}
+        result = {'saved': str(output), 'name': result['name'], 'mimetype': result['mimetype'],
+                  **({'transcription': result['transcription']} if 'transcription' in result else {})}
     print(json.dumps(result, ensure_ascii=False))
 
 

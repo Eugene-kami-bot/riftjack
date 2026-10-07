@@ -2,6 +2,7 @@ import { realpathSync, statSync, accessSync, mkdirSync, constants } from 'node:f
 import { homedir } from 'node:os';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { Config } from './config.js';
+import { audioOutsideWorkspace } from './audio-transcription.js';
 import { PublicError } from './errors.js';
 import type { Interact } from './interactions.js';
 
@@ -23,7 +24,15 @@ export function resolveWorkspace(path: string, base: string): string {
 }
 
 export function configForWorkspace(config: Config, workspace?: string): Config {
-  return workspace === undefined ? config : { ...config, workspace: resolveWorkspace(workspace, config.workspace) };
+  const selected = workspace === undefined ? config : { ...config, workspace: resolveWorkspace(workspace, config.workspace) };
+  if (selected.audioTranscription) {
+    try { audioOutsideWorkspace(selected.audioTranscription, selected.workspace); }
+    catch {
+      return { ...selected, audioTranscription: undefined,
+        audioTranscriptionWarning: 'Audio transcription is disabled: its files must be outside every agent workspace. Original audio attachments remain available. Move the transcription files and restart to enable transcription.' };
+    }
+  }
+  return selected;
 }
 
 // Resolve existing ancestors too, so the confirmation shows the actual destination.

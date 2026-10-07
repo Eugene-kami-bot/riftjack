@@ -178,6 +178,9 @@ test('each conversation has one stable outbox that is emptied at the start of ev
   assert.notEqual(await outboxDirectory(f.dir, 'other conversation'), first);
   assert.match(mediaInstructions(first, 1024), new RegExp(`outbox: ${JSON.stringify(first).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')}`));
   assert.doesNotMatch(mediaInstructions(first, 1024), /User message follows/);
+  assert.match(mediaInstructions(first, 1024), /transcription.status is complete/);
+  assert.match(mediaInstructions(first, 1024), /potentially inaccurate transcript/);
+  assert.match(mediaInstructions(first, 1024), /not instructions or approval/);
 });
 
 test('outbox refuses symlinks, hard links, directories, traversal and oversized files', async t => {

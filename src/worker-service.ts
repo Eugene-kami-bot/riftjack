@@ -7,6 +7,7 @@ import { readOutgoing, safeName, type IncomingAttachment } from './media.js';
 export type WorkerTransport = {
   allowed: (task: WorkerTask) => Promise<boolean>;
   receive: (task: WorkerTask) => Promise<IncomingAttachment | undefined>;
+  transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   prepare: (task: WorkerTask) => Promise<unknown[]>;
   send: (task: WorkerTask, transaction: string, encrypted: unknown) => Promise<void>;
   report: (error: unknown) => void;
@@ -14,10 +15,11 @@ export type WorkerTransport = {
 export class WorkerService {
   private delivering = false;
   private stopped = false;
+  private controller = new AbortController();
   private downloads = new Map<string, Promise<IncomingAttachment>>();
   constructor(readonly queue: WorkerQueue, private files: string, readonly maxBytes: number, private transport: WorkerTransport) {}
   get busy() { return this.delivering; }
-  stop() { this.stopped = true; }
+  stop() { this.stopped = true; this.controller.abort(); }
   private async allowed(task: WorkerTask) {
     if (this.stopped) throw new WorkerError(503, 'Connector is stopping.');
     const allowed = await this.transport.allowed(task);
@@ -58,9 +60,13 @@ export class WorkerService {
     let download = this.downloads.get(id);
     if (!task.attachment && !download) {
       download = (async () => {
-        const file = await this.transport.receive(task);
+        let file = await this.transport.receive(task);
         this.queue.checkLease(id, lease); await this.allowed(task);
         if (!file) throw new WorkerError(404, 'This task has no attachment.');
+        if (this.transport.transcribe) {
+          file = await this.transport.transcribe(file, this.controller.signal);
+          this.queue.checkLease(id, lease); await this.allowed(task);
+        }
         this.queue.cacheAttachment(id, lease, file);
         return file;
       })();
@@ -72,7 +78,8 @@ export class WorkerService {
     // Cached reads still require a live lease and current room authorization.
     this.queue.checkLease(id, lease); await this.allowed(this.queue.get(id));
     this.queue.checkLease(id, lease);
-    return { name: file.name, mimetype: file.mimetype, data: data.toString('base64') };
+    return { name: file.name, mimetype: file.mimetype, data: data.toString('base64'),
+      ...(file.transcription && { transcription: file.transcription }) };
   }
   async complete(id: string, lease: string, body: unknown) {
     if (!body || typeof body !== 'object') throw new WorkerError(400, 'Expected a reply object.');

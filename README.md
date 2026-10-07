@@ -16,7 +16,7 @@ Use Element X or another Matrix client. Accept your bot’s encrypted chat invit
 >
 > Send me the patch when you’re done.
 
-You can send text, images, documents, and audio files, and receive files back. Codex and Claude can deliver ready files while continuing to work. Images reach the agent as image inputs; documents and audio are provided as local files. Audio transcription depends on the agent’s available tools.
+You can send text, images, documents, and audio files, and receive files back. Codex and Claude can deliver ready files while continuing to work. Images reach the agent as image inputs; documents and audio are provided as local files. Optional [local audio transcription](docs/audio-transcription.md) is disabled by default; without it, transcription depends on the agent's available tools.
 
 Messages sent while Codex works can steer its active task. Claude also accepts updates into its running task when its CLI supports message replay; otherwise it queues follow-ups. See [messages during work](docs/chat.md#messages-during-work). When an action needs permission, the bot brings the request into the same conversation. Approve the displayed request with `!approve` or ✅, or decline with `!deny` or ❌.
 

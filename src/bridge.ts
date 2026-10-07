@@ -47,6 +47,7 @@ type Options = {
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal) => Promise<IncomingAttachment>;
+  transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
@@ -457,8 +458,12 @@ export class Bridge {
     await this.authorize(room, active);
     if (!isMedia(event.content?.msgtype)) return [];
     if (!this.options.receive) throw new PublicError('Attachment reception is not configured.');
-    const file = await this.options.receive(event, active.key, active.controller.signal);
+    let file = await this.options.receive(event, active.key, active.controller.signal);
     await this.authorize(room, active);
+    if (this.options.transcribe) {
+      file = await this.options.transcribe(file, active.controller.signal);
+      await this.authorize(room, active);
+    }
     return [file];
   }
 

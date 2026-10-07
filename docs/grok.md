@@ -99,7 +99,9 @@ python3 worker-client.py reply task.json --text-file answer.txt --file report.pd
 
 Images, files and audio use Matrix attachment encryption. Up to ten files may be
 attached; their **combined** size must fit `MAX_MEDIA_BYTES` (512 MiB by default).
-Audio transcription is the worker's responsibility. The API accepts file bytes,
+Optional [local audio transcription](audio-transcription.md) adds transcript
+metadata to downloaded attachments and is disabled by default. Without it,
+audio transcription is the worker's responsibility. The API accepts file bytes,
 never paths to files on the connector host.
 
 In the Grok DM, `!status` shows queued work, active leases and pending replies. Model settings and the worker workspace are explicitly marked as unreported; the connector does not infer them from the bot name. `!cancel` cancels queued tasks and leases for that conversation;

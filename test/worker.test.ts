@@ -22,21 +22,25 @@ const idle = async (service: WorkerService) => { while (service.busy) await new 
 test('attachment downloads are shared, persisted across restart and guarded on every cached read', async t => {
   const dir = realpathSync(directory(t)), db = join(dir, 'queue.sqlite'), path = join(dir, 'attachment.txt');
   writeFileSync(path, 'hello');
-  let queue = new WorkerQueue(db), downloads = 0, allowed = true;
+  let queue = new WorkerQueue(db), downloads = 0, transcriptions = 0, allowed = true;
+  const transcription = { status: 'complete' as const, text: 'Example speech.', automatic: true as const };
   const transport = { allowed: async () => allowed, receive: async () => {
     downloads++; await new Promise(resolve => setTimeout(resolve, 10));
     return { path, name: 'attachment.txt', size: 5, mimetype: 'text/plain', image: false };
-  }, prepare: async () => [], send: async () => {}, report: () => {} };
+  }, transcribe: async (file: import('../src/media.js').IncomingAttachment) => { transcriptions++; return { ...file, transcription }; },
+    prepare: async () => [], send: async () => {}, report: () => {} };
   let service = new WorkerService(queue, join(dir, 'files'), 100, transport);
   const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
   const replies = await Promise.all([service.attachment(task.id, task.lease!), service.attachment(task.id, task.lease!)]);
   assert.equal(downloads, 1); assert.deepEqual(replies[0], replies[1]);
   assert.equal(Buffer.from(replies[0].data, 'base64').toString(), 'hello');
+  assert.deepEqual(replies[0].transcription, transcription);
   service.stop(); queue.close(); queue = new WorkerQueue(db);
   service = new WorkerService(queue, join(dir, 'files'), 100, transport);
   t.after(() => { service.stop(); queue.close(); });
   assert.deepEqual(await service.attachment(task.id, task.lease!), replies[0]);
   assert.equal(downloads, 1);
+  assert.equal(transcriptions, 1);
   queue.release(task.id, task.lease!);
   const renewed = queue.claim(task.id)!;
   await assert.rejects(service.attachment(task.id, task.lease!), /replaced/);
@@ -44,6 +48,21 @@ test('attachment downloads are shared, persisted across restart and guarded on e
   allowed = false;
   await assert.rejects(service.attachment(task.id, renewed.lease!), /privacy changed/);
   assert.equal(downloads, 1);
+});
+
+test('revocation during transcription withholds and does not cache the worker result', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  let allowed = true;
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => allowed,
+    receive: async () => ({ path: '/audio', name: 'audio', size: 1, image: false, mimetype: 'audio/ogg' }),
+    transcribe: async file => { allowed = false; return { ...file, transcription: { status: 'complete', text: 'Private speech.', automatic: true } }; },
+    prepare: async () => [], send: async () => {}, report: () => {},
+  });
+  t.after(() => { service.stop(); queue.close(); });
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  await assert.rejects(service.attachment(task.id, task.lease!), /privacy changed/);
+  assert.equal(queue.get(task.id).attachment, undefined);
 });
 
 test('failed attachment downloads can be retried without poisoning the cache', async t => {

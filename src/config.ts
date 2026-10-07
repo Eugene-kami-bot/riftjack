@@ -2,6 +2,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadTunnelConfig } from './ssh-tunnel.js';
 import { loadFetchConfig } from './fetch.js';
+import { optionalAudioConfig } from './audio-transcription.js';
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const required = (name: string) => {
@@ -65,6 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     maxMediaBytes,
     mediaUploadTimeoutMs,
     fetch: loadFetchConfig(env, workspace),
+    ...optionalAudioConfig(env, workspace),
   };
 }
 export type Config = ReturnType<typeof loadConfig>;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, realpathSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -20,8 +20,12 @@ function directory(t: { after(fn: () => void): void }) {
 const idle = async (service: WorkerService) => { while (service.busy) await new Promise(resolve => setTimeout(resolve, 1)); };
 
 test('worker HTTP API authenticates per bot, supports long polling, and validates replies', async t => {
-  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
-  const service = new WorkerService(queue, join(dir, 'files'), 10, { allowed: async () => true, receive: async () => undefined,
+  const dir = realpathSync(directory(t)), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const audioPath = join(dir, 'voice.ogg'); writeFileSync(audioPath, 'audio');
+  const transcription = { status: 'complete' as const, text: 'Example speech.', automatic: true as const };
+  const service = new WorkerService(queue, join(dir, 'files'), 10, { allowed: async () => true,
+    receive: async () => ({ path: audioPath, name: 'voice.ogg', image: false, mimetype: 'audio/ogg', size: 5 }),
+    transcribe: async file => ({ ...file, transcription }),
     prepare: async task => [{ text: task.response!.text }], send: async () => {}, report: () => {} });
   const server = new WorkerServer(); server.add('@grok:test', 'a'.repeat(43), service);
   const port = await server.start(0);
@@ -52,6 +56,10 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   const claimed = JSON.parse((await cli('wait', '--seconds', '1')).stdout);
   assert.equal(claimed.text, 'hello'); writeFileSync(taskFile, JSON.stringify(claimed));
   assert.ok(JSON.parse((await cli('renew', taskFile)).stdout).leaseUntil);
+  const savedAudio = join(dir, 'saved.ogg');
+  const saved = JSON.parse((await cli('attachment', taskFile, '--output', savedAudio)).stdout);
+  assert.deepEqual(saved.transcription, transcription);
+  assert.equal(readFileSync(savedAudio, 'utf8'), 'audio');
   assert.equal(JSON.parse((await cli('reply', taskFile, '--text-file', replyFile)).stdout).status, 'replied');
   await idle(service);
   assert.equal(JSON.parse((await cli('status', taskFile)).stdout).status, 'delivered');

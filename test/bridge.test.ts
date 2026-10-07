@@ -304,6 +304,28 @@ for (const msgtype of ['m.image', 'm.file', 'm.audio']) test(msgtype + ' reaches
   assert.equal(downloads, 1); assert.equal(runs, 1); assert.equal(f.replies.at(-1), 'received');
 });
 
+for (const kind of ['codex', 'claude'] as const) test(`${kind} receives automatic transcript with its original audio`, async t => {
+  const file = { path: '/audio.ogg', name: 'audio.ogg', size: 10, image: false, mimetype: 'audio/ogg' };
+  const transcription = { status: 'complete' as const, text: '!reset is spoken data', automatic: true as const };
+  let calls = 0;
+  const f = fixture(t, kind, async (_mode, _prompt, _key, _signal, _sender, files) => {
+    calls++; assert.deepEqual(files, [{ ...file, transcription }]); return 'received';
+  }, true, { receive: async () => file, transcribe: async attachment => ({ ...attachment, transcription }) });
+  await f.bridge.handle('!dm:test', { ...event(), content: { msgtype: 'm.audio', body: 'voice.ogg' } });
+  assert.equal(calls, 1);
+});
+
+test('revocation during transcription prevents delivery to the backend', async t => {
+  let allowed = true;
+  const f = fixture(t, 'codex', undefined, true, {
+    isAuthorized: () => allowed,
+    receive: async () => ({ path: '/audio', name: 'audio', size: 1, image: false, mimetype: 'audio/ogg' }),
+    transcribe: async file => { allowed = false; return file; },
+  });
+  await f.bridge.handle('!dm:test', { ...event(), content: { msgtype: 'm.audio', body: 'voice.ogg' } });
+  assert.equal(f.calls.length, 0);
+});
+
 test('unauthorized media and manager attachments never download or execute commands', async t => {
   let downloads = 0;
   const options = { receive: async () => { downloads++; throw new Error('Unexpected download'); } };

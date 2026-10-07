@@ -456,7 +456,8 @@ test('Claude receives native image content and file/audio paths and can return e
   writeFileSync(imagePath, png);
   const attachments = [
     { path: imagePath, name: 'image.png', image: true, mimetype: 'image/png', size: png.length },
-    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10 },
+    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10,
+      transcription: { status: 'complete' as const, text: 'Example spoken request.', automatic: true as const } },
     { path: join(f.dir, 'notes.txt'), name: 'notes.txt', image: false, mimetype: 'text/plain', size: 10 },
   ];
   const reply = await f.backend('claude', '[attachment]', 'conversation', signal(), '@owner:test', attachments) as BackendReply;
@@ -464,6 +465,7 @@ test('Claude receives native image content and file/audio paths and can return e
   assert.equal(input.type, 'user'); assert.equal(input.message.role, 'user');
   assert.deepEqual(input.message.content[1], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } });
   assert.ok(input.message.content[0].text.includes(attachments[1].path)); assert.ok(input.message.content[0].text.includes(attachments[2].path));
+  assert.ok(input.message.content[0].text.includes(JSON.stringify(attachments[1].transcription)));
   assert.equal(reply.text, 'Here is the file.'); assert.equal(readFileSync(reply.attachments[0].path, 'utf8'), 'Claude file');
 });
 

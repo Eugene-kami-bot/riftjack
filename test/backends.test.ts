@@ -415,13 +415,15 @@ test('native images and local audio/file metadata survive the App Server transpo
   const f = setup(t);
   const attachments = [
     { path: join(f.dir, 'image.png'), name: 'image.png', image: true, mimetype: 'image/png', size: 10 },
-    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10 },
+    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10,
+      transcription: { status: 'complete' as const, text: 'Example spoken request.', automatic: true as const } },
     { path: join(f.dir, 'notes.txt'), name: 'notes.txt', image: false, mimetype: 'text/plain', size: 10 },
   ];
   const reply = await f.backend('codex', '[attachment]', 'key', signal(), '@owner:test', attachments) as BackendReply;
   const input = f.calls().find(c => c.method === 'turn/start').params.input;
   assert.deepEqual(input[1], { type: 'localImage', path: attachments[0].path });
   assert.equal(input.length, 2); assert.ok(input[0].text.includes(attachments[1].path)); assert.ok(input[0].text.includes(attachments[2].path));
+  assert.ok(input[0].text.includes(JSON.stringify(attachments[1].transcription)));
   assert.equal(reply.text, 'Here is the file.'); assert.equal(readFileSync(reply.attachments[0].path, 'utf8'), 'file contents');
 });
 
