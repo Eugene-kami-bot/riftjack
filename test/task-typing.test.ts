@@ -57,42 +57,92 @@ test('typing failures are reported and cleanup still attempts a clear', async ()
 });
 
 
-test('a message during an in-flight renewal schedules one serialized refresh', async () => {
-  const calls: boolean[] = [];
+test('a message waits for an in-flight renewal and restores typing 250 ms after delivery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const events: (boolean | string)[] = [];
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
-  const typing = taskTyping(async value => { calls.push(value); if (calls.length === 1) await pending; },
+  const typing = taskTyping(async value => { events.push(value); if (events.length === 1) await pending; },
     async () => true, error => { throw error; }, new AbortController().signal);
   await flush();
-  typing.refresh(); typing.refresh();
-  assert.deepEqual(calls, [true]);
-  release(); await flush();
-  assert.deepEqual(calls, [true, false, true]);
-  await typing.close(); typing.refresh(); await flush();
-  assert.deepEqual(calls, [true, false, true, false]);
+  const delivery = typing.message(async () => { events.push('message'); });
+  await flush(); assert.deepEqual(events, [true]);
+  release(); await delivery;
+  assert.deepEqual(events, [true, false, 'message']);
+  t.mock.timers.tick(249); await flush();
+  assert.deepEqual(events, [true, false, 'message']);
+  t.mock.timers.tick(1); await flush();
+  assert.deepEqual(events, [true, false, 'message', true]);
+  await typing.close();
 });
 
-test('cancellation discards a refresh requested while a send was in flight', async () => {
-  const calls: boolean[] = [], controller = new AbortController();
-  let release!: () => void;
-  const pending = new Promise<void>(resolve => { release = resolve; });
-  const typing = taskTyping(async value => { calls.push(value); if (value) await pending; },
-    async () => true, error => { throw error; }, controller.signal);
-  await flush(); typing.refresh(); controller.abort();
-  release(); await typing.close();
-  assert.deepEqual(calls, [true, false]);
+test('renewals stay paused until all overlapping deliveries finish, with a fresh delay after the last one', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const calls: boolean[] = [];
+  const typing = taskTyping(async value => { calls.push(value); }, async () => true,
+    error => { throw error; }, new AbortController().signal);
+  await flush();
+  let first!: () => void, second!: () => void;
+  const a = typing.message(() => new Promise<void>(resolve => { first = resolve; }));
+  const b = typing.message(() => new Promise<void>(resolve => { second = resolve; }));
+  await flush();
+  t.mock.timers.tick(30_000); await flush();
+  assert.deepEqual(calls, [true, false, false]);
+  first(); await a;
+  t.mock.timers.tick(250); await flush();
+  assert.deepEqual(calls, [true, false, false]);
+  second(); await b;
+  t.mock.timers.tick(249); await flush();
+  assert.deepEqual(calls, [true, false, false]);
+  t.mock.timers.tick(1); await flush();
+  assert.equal(calls.at(-1), true);
+  await typing.close();
 });
 
-for (const stop of ['cancel', 'access revoked'] as const) test(`a message refresh cannot restore typing after ${stop} during its clear`, async () => {
+for (const stop of ['cancel', 'close', 'access revoked'] as const) test(`a delayed restore cannot turn typing on after ${stop}`, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const calls: boolean[] = [], controller = new AbortController();
-  let allowed = true, release!: () => void;
-  const clearing = new Promise<void>(resolve => { release = resolve; });
-  const typing = taskTyping(async value => { calls.push(value); if (!value) await clearing; },
-    async () => allowed, error => { throw error; }, controller.signal);
-  await flush(); typing.refresh(); await flush();
+  let allowed = true;
+  const typing = taskTyping(async value => { calls.push(value); }, async () => allowed,
+    error => { throw error; }, controller.signal);
+  await flush(); await typing.message(async () => {});
   assert.deepEqual(calls, [true, false]);
   if (stop === 'cancel') controller.abort();
+  else if (stop === 'close') await typing.close();
   else allowed = false;
-  release(); await flush(); await typing.close();
-  assert.equal(calls.slice(1).includes(true), false);
+  t.mock.timers.tick(30_000); await flush();
+  assert.equal(calls.filter(Boolean).length, 1);
+  await typing.close();
+});
+
+test('a subsequent message resets the restore delay and delivery errors retain their cause', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const calls: boolean[] = [], failure = new Error('delivery failed');
+  const typing = taskTyping(async value => { calls.push(value); }, async () => true,
+    error => { throw error; }, new AbortController().signal);
+  await flush(); await typing.message(async () => {});
+  t.mock.timers.tick(200); await flush();
+  await assert.rejects(typing.message(async () => { throw failure; }), error => error === failure);
+  t.mock.timers.tick(50); await flush();
+  assert.deepEqual(calls, [true, false, false]);
+  t.mock.timers.tick(200); await flush();
+  assert.equal(calls.at(-1), true);
+  await typing.close();
+});
+
+test('cancellation during the pre-message clear prevents a stale delivery and any restore', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const calls: boolean[] = [], controller = new AbortController();
+  let release!: () => void, delivered = false;
+  const clearing = new Promise<void>(resolve => { release = resolve; });
+  const typing = taskTyping(async value => { calls.push(value); if (!value) await clearing; },
+    async () => true, error => { throw error; }, controller.signal);
+  await flush();
+  const delivery = typing.message(async () => { delivered = true; });
+  await flush(); controller.abort();
+  const rejected = assert.rejects(delivery, { name: 'AbortError' });
+  release(); await rejected; await typing.close();
+  t.mock.timers.tick(30_000); await flush();
+  assert.equal(delivered, false);
+  assert.equal(calls.filter(Boolean).length, 1);
 });

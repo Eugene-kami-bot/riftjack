@@ -280,13 +280,13 @@ or awaiting confirmation within that request. The standard Matrix indicator
 covers an active task, including tool calls, preparation and final delivery.
 Ordinary messages start without a separate text acknowledgement. Local
 commands such as `!status` do not start it. The connector renews the indicator
-every 15 seconds with a 30-second server expiry, refreshes it after outgoing
-replies, confirmations and task attachments, and clears it on completion,
-cancellation or failure. After a crash it expires without a cleanup request.
-Access is checked before each update; indicator errors do not fail the task.
-After delivery, the refresh clears and restores typing: Synapse suppresses
-notifications for repeated `typing: true`, while clients can hide the indicator
-when a message arrives. Cancellation prevents the restore. A brief visual flicker
+every 15 seconds with a 30-second server expiry. Before outgoing replies,
+confirmations and task attachments, it clears typing and pauses renewal; 250 ms
+after delivery, it restores typing if the task is still active. This separates
+the new typing event from the message that can hide the indicator in clients.
+Completion, cancellation or failure clears the indicator and cancels a pending
+restore. After a crash it expires without a cleanup request. Access is checked
+before each update; indicator errors do not fail the task. A brief visual flicker
 can still depend on the client.
 
 The indicator belongs to the room, not an individual thread. Element controls

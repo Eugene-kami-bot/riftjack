@@ -25,7 +25,7 @@ test('typing covers backend work and final delivery, but not local commands or d
   const calls: boolean[] = [], ready = gate(), finish = gate();
   const f = fixture(t, 'codex', async () => { ready.release(); await finish.promise; return 'done'; }, true, {
     typing: async (_room, typing) => { calls.push(typing); },
-    reply: async (_room, _event, text) => { if (text === 'done') assert.equal(calls.at(-1), true); },
+    reply: async (_room, _event, text) => { if (text === 'done') assert.equal(calls.at(-1), false); },
   });
   await f.bridge.handle('!dm:test', event('!status', '$status'));
   await f.bridge.handle('!dm:test', { ...event('hello', '$denied'), sender: '@other:test' });
@@ -918,8 +918,9 @@ test('compaction service hook uses the human identity, and delivery failure does
 });
 
 
-for (const delivery of ['progress', 'attachment'] as const) test(`typing resumes immediately after ${delivery} delivery while the task is active`, async t => {
+for (const delivery of ['progress', 'attachment'] as const) test(`typing clears before ${delivery} delivery and resumes after a delay while the task is active`, async t => {
   const ready = gate(), finish = gate();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let visible = false, serverTyping = false;
   const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
     if (delivery === 'progress') await hooks!.progress!('Still working');
@@ -932,13 +933,16 @@ for (const delivery of ['progress', 'attachment'] as const) test(`typing resumes
       if (serverTyping !== typing) visible = typing;
       serverTyping = typing;
     },
-    reply: async () => { visible = false; }, // Clients can clear typing when a message arrives.
-    sendAttachments: async () => { visible = false; },
+    reply: async () => { assert.equal(serverTyping, false); visible = false; },
+    sendAttachments: async () => { assert.equal(serverTyping, false); visible = false; },
   });
   const task = f.bridge.handle('!dm:test', event());
   try {
     await ready.promise;
-    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(visible, false);
+    t.mock.timers.tick(249); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(visible, false);
+    t.mock.timers.tick(1); await new Promise(resolve => setImmediate(resolve));
     assert.equal(visible, true);
   } finally { finish.release(); await task; }
   assert.equal(visible, false);

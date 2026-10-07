@@ -95,12 +95,12 @@ export class Bridge {
   private draining = false;
   private admission = Promise.resolve();
   constructor(private options: Options) {}
-  private refreshTyping(room: string): void {
-    if (this.active?.room === room) this.active.typing?.refresh();
+  private deliver<T>(room: string, send: () => Promise<T>): Promise<T> {
+    const typing = this.active?.room === room ? this.active.typing : undefined;
+    return typing ? typing.message(send) : send();
   }
-  private async reply(...args: Parameters<Options['reply']>): Promise<void> {
-    await this.options.reply(...args);
-    this.refreshTyping(args[0]);
+  private reply(...args: Parameters<Options['reply']>): Promise<void> {
+    return this.deliver(args[0], () => this.options.reply(...args));
   }
   get busy(): boolean { return !!this.active || this.draining || (!!this.options.linkedSession && this.options.state.queued(this.options.botId) > 0); }
   stop() { this.stopped = true; this.active?.controller.abort(); }
@@ -319,13 +319,12 @@ export class Bridge {
             await this.authorize(room, current);
             if (request.attachments?.length) {
               if (!o.sendAttachments) throw new PublicError('Review attachment delivery is not configured.');
-              await o.sendAttachments(room, requestEvent, request.attachments, AbortSignal.any([controller.signal, requestSignal]));
+              await this.deliver(room, () => o.sendAttachments!(room, requestEvent, request.attachments!, AbortSignal.any([controller.signal, requestSignal])));
               await this.authorize(room, current);
               requestSignal.throwIfAborted();
             }
-            if (o.confirmation) await o.confirmation(room, requestEvent, text, controls, markdown);
+            if (o.confirmation) await this.deliver(room, () => o.confirmation!(room, requestEvent, text, controls, markdown));
             else await this.reply(room, requestEvent, text);
-            if (o.confirmation) this.refreshTyping(room);
           });
         const publish: PublishAction | undefined = o.publish ? async (input, callSignal) => {
           if (current.publication) throw new PublicError('A publication review is already pending.');
@@ -362,8 +361,7 @@ export class Bridge {
             signal.throwIfAborted();
             await this.authorize(room, current);
             signal.throwIfAborted();
-            await o.sendAttachments!(room, requestEvent, files, signal);
-            this.refreshTyping(room);
+            await this.deliver(room, () => o.sendAttachments!(room, requestEvent, files, signal));
           } : undefined,
           background: o.background ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
@@ -396,8 +394,7 @@ export class Bridge {
         const sendFiles = async () => {
           if (!files.length) return;
           if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
-          await o.sendAttachments(room, responseEvent, files, controller.signal);
-          this.refreshTyping(room);
+          await this.deliver(room, () => o.sendAttachments!(room, responseEvent, files, controller.signal));
         };
         // A peer-started turn, or any turn in a shared room, may decline to
         // answer: the text is dropped, attachments are still sent. Commands
