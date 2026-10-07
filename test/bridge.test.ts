@@ -34,7 +34,8 @@ test('typing covers backend work and final delivery, but not local commands or d
   assert.deepEqual(calls, [true]);
   finish.release(); await task;
   assert.equal(calls.at(-1), false);
-  assert.equal(calls.filter(typing => !typing).length, 1);
+  // Final delivery may already clear the indicator before task cleanup does.
+  assert.equal(calls.filter(typing => typing).length, 1);
 });
 
 for (const end of ['failure', 'cancel', 'stop'] as const) test(`typing clears after task ${end}`, async t => {
@@ -49,7 +50,9 @@ for (const end of ['failure', 'cancel', 'stop'] as const) test(`typing clears af
   if (end === 'cancel') await f.bridge.handle('!dm:test', event('!cancel', '$cancel'));
   if (end === 'stop') f.bridge.stop();
   await task;
-  assert.deepEqual(calls, [true, false]);
+  assert.equal(calls[0], true);
+  assert.equal(calls.at(-1), false);
+  assert.equal(calls.filter(typing => typing).length, 1);
 });
 
 test('manager accepts avatar names and reports target errors before downloading images', async t => {
@@ -917,14 +920,18 @@ test('compaction service hook uses the human identity, and delivery failure does
 
 for (const delivery of ['progress', 'attachment'] as const) test(`typing resumes immediately after ${delivery} delivery while the task is active`, async t => {
   const ready = gate(), finish = gate();
-  let visible = false;
+  let visible = false, serverTyping = false;
   const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
     if (delivery === 'progress') await hooks!.progress!('Still working');
     else await hooks!.sendAttachments!([{ root: '/outbox', path: '/outbox/file.txt' }], new AbortController().signal);
     ready.release(); await finish.promise;
     return 'done';
   }, true, {
-    typing: async (_room, typing) => { visible = typing; },
+    typing: async (_room, typing) => {
+      // Synapse renews the TTL without emitting m.typing if the value is unchanged.
+      if (serverTyping !== typing) visible = typing;
+      serverTyping = typing;
+    },
     reply: async () => { visible = false; }, // Clients can clear typing when a message arrives.
     sendAttachments: async () => { visible = false; },
   });

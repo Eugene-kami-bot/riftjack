@@ -67,9 +67,9 @@ test('a message during an in-flight renewal schedules one serialized refresh', a
   typing.refresh(); typing.refresh();
   assert.deepEqual(calls, [true]);
   release(); await flush();
-  assert.deepEqual(calls, [true, true]);
+  assert.deepEqual(calls, [true, false, true]);
   await typing.close(); typing.refresh(); await flush();
-  assert.deepEqual(calls, [true, true, false]);
+  assert.deepEqual(calls, [true, false, true, false]);
 });
 
 test('cancellation discards a refresh requested while a send was in flight', async () => {
@@ -81,4 +81,18 @@ test('cancellation discards a refresh requested while a send was in flight', asy
   await flush(); typing.refresh(); controller.abort();
   release(); await typing.close();
   assert.deepEqual(calls, [true, false]);
+});
+
+for (const stop of ['cancel', 'access revoked'] as const) test(`a message refresh cannot restore typing after ${stop} during its clear`, async () => {
+  const calls: boolean[] = [], controller = new AbortController();
+  let allowed = true, release!: () => void;
+  const clearing = new Promise<void>(resolve => { release = resolve; });
+  const typing = taskTyping(async value => { calls.push(value); if (!value) await clearing; },
+    async () => allowed, error => { throw error; }, controller.signal);
+  await flush(); typing.refresh(); await flush();
+  assert.deepEqual(calls, [true, false]);
+  if (stop === 'cancel') controller.abort();
+  else allowed = false;
+  release(); await flush(); await typing.close();
+  assert.equal(calls.slice(1).includes(true), false);
 });

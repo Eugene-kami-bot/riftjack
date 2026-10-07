@@ -284,6 +284,10 @@ every 15 seconds with a 30-second server expiry, refreshes it after outgoing
 replies, confirmations and task attachments, and clears it on completion,
 cancellation or failure. After a crash it expires without a cleanup request.
 Access is checked before each update; indicator errors do not fail the task.
+After delivery, the refresh clears and restores typing: Synapse suppresses
+notifications for repeated `typing: true`, while clients can hide the indicator
+when a message arrives. Cancellation prevents the restore. A brief visual flicker
+can still depend on the client.
 
 The indicator belongs to the room, not an individual thread. Element controls
 how it is displayed, and clients may hide it. It indicates an active run, not

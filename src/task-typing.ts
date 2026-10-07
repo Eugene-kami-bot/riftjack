@@ -13,9 +13,15 @@ export function taskTyping(send: (typing: boolean, timeout: number) => Promise<u
   const refresh = (afterMessage = false) => {
     if (closed || signal.aborted) return;
     if (pending) { refreshRequested ||= afterMessage; return; }
-    pending = update(true).finally(() => {
+    pending = (async () => {
+      // A repeated true only extends the TTL on Synapse: no new m.typing event
+      // reaches a client that cleared its indicator on message receipt. Toggle
+      // after delivery to emit a fresh event; keep ordinary renewals unchanged.
+      if (afterMessage) await update(false);
+      await update(true); // Rechecks authorization and cancellation after the clear.
+    })().finally(() => {
       pending = undefined;
-      if (refreshRequested) { refreshRequested = false; refresh(); }
+      if (refreshRequested) { refreshRequested = false; refresh(true); }
     });
   };
   const timer = setInterval(() => refresh(), 15_000);
