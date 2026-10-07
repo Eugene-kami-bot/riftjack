@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { roomMessageDelivery } from '../src/room-messages.js';
 import { Bridge, type BackendHooks } from '../src/bridge.js';
 import { State } from '../src/state.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,6 +33,30 @@ test('room sends reject malformed input, extra authority fields and oversized Un
   await action({ ...request, text: '界'.repeat(2666) }, signal);
   await action({ action: 'list' }, signal);
   assert.equal(calls, 2);
+});
+
+test('attachment actions validate event ids and pin sends to the backend outbox', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'room-files-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const requests: unknown[] = [];
+  const action = roomMessageDelivery(async request => { requests.push(request); return '{}'; });
+  const receive = { action: 'receive_attachment', room: '!shared:test', event_id: '$image' };
+  const files = { action: 'send_files', room: '!shared:test', id: 'files-1', files: [{ path: 'picture.png', name: 'Picture' }] };
+  for (const input of [
+    { ...receive, event_id: 'invalid' }, { ...receive, event_id: '$bad id' }, { ...receive, room: 'invalid' },
+    { ...receive, sender: '@alice:test' }, { ...files, outbox: root }, { ...files, mention: true },
+    { ...files, files: [] }, { ...files, files: [{ path: '../secret' }] },
+    { ...files, files: [{ path: '/secret' }] }, { ...files, files: [{ path: 'file', root }] },
+    { ...files, files: Array(11).fill({ path: 'file' }) },
+  ]) await assert.rejects(action(input, signal, root));
+  await assert.rejects(action(files, signal));
+  assert.equal(requests.length, 0);
+  await action(receive, signal);
+  await action(files, signal, root); await action(files, signal, root);
+  await action({ ...files, files: [{ name: 'Picture', path: 'picture.png' }] }, signal, root);
+  await assert.rejects(action({ ...files, files: [{ path: 'other' }] }, signal, root), /different content/);
+  await assert.rejects(action({ ...request, id: files.id }, signal), /different content/);
+  assert.deepEqual(requests, [receive, { ...files, outbox: root }]);
 });
 
 test('room tool expires with its turn and rechecks source authorization even for a cached request', async t => {

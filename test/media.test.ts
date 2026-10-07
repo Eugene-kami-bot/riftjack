@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, symlinkSync, linkSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { open } from 'node:fs/promises';
 import { Attachment, EncryptedAttachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { EncryptedFile } from '@vector-im/matrix-bot-sdk';
 import { MatrixMedia, mediaDirectory, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, readLimited, safeName } from '../src/media.js';
@@ -17,6 +18,7 @@ function setup(t: { after(fn: () => void): void }, maxBytes = 1024) {
   const uploads: Buffer[] = [], messages: Record<string, any>[] = [];
   let download: Buffer = Buffer.alloc(0);
   let fetches = 0;
+  let onDownload = () => {};
   const media = new MatrixMedia({
     mxcToHttp: async () => 'https://matrix.test/_matrix/client/v1/media/download/matrix.test/id',
     sendMessage: async (room, content) => { assert.equal(room, '!dm:test'); messages.push(content); return '$sent'; },
@@ -34,6 +36,7 @@ function setup(t: { after(fn: () => void): void }, maxBytes = 1024) {
       uploads.push(data);
       return Response.json({ content_uri: 'mxc://matrix.test/id' });
     }
+    onDownload();
     return new Response(new Uint8Array(download));
   });
   function encrypted(data: Buffer): EncryptedFile {
@@ -42,8 +45,59 @@ function setup(t: { after(fn: () => void): void }, maxBytes = 1024) {
     return { ...JSON.parse(result.mediaEncryptionInfo!), url: 'mxc://matrix.test/id' };
   }
   return { dir, media, uploads, messages, encrypted, fetches: () => fetches,
-    corrupt: () => { download[0] ^= 1; } };
+    corrupt: () => { download[0] ^= 1; }, onDownload: (fn: () => void) => { onDownload = fn; } };
 }
+
+function incomingFiles(dir: string): string[] {
+  return readdirSync(dir, { recursive: true }).map(String).filter(name => name.includes('attachment-'));
+}
+
+test('revoking access during an encrypted download exposes no plaintext file', async t => {
+  const f = setup(t);
+  const file = f.encrypted(png);
+  let allowed = true;
+  f.onDownload(() => { allowed = false; });
+  await assert.rejects(f.media.receive({ file }, 'key', signal(), async () => {
+    assert.ok(readdirSync(f.dir, { recursive: true }).some(name => String(name).includes('task-')));
+    if (!allowed) throw new Error('Access revoked');
+  }), /Access revoked/);
+  assert.deepEqual(incomingFiles(f.dir), []);
+});
+
+test('cancellation while awaiting incoming authorization exposes no plaintext file', async t => {
+  const f = setup(t);
+  const abort = new AbortController();
+  await assert.rejects(f.media.receive({ file: f.encrypted(png) }, 'key', abort.signal, async () => {
+    await Promise.resolve();
+    abort.abort();
+  }), /abort/i);
+  assert.deepEqual(incomingFiles(f.dir), []);
+});
+
+test('failed incoming writes remove the partial file created by the attempt', async t => {
+  const f = setup(t);
+  const handle = await open(join(f.dir, 'probe'), 'wx');
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const write = prototype.writeFile;
+  t.mock.method(prototype, 'writeFile', async function(this: typeof handle, data: Buffer) {
+    await write.call(this, data.subarray(0, 3));
+    throw new Error('Simulated write failure');
+  });
+  await assert.rejects(f.media.receive({ file: f.encrypted(png) }, 'key', signal(), async () => {}), /Simulated write failure/);
+  assert.deepEqual(incomingFiles(f.dir), []);
+});
+
+test('incoming EEXIST preserves the file that existed before the write attempt', async t => {
+  const f = setup(t);
+  let existing = '';
+  await assert.rejects(f.media.receive({ file: f.encrypted(png), body: 'image.png' }, 'key', signal(), async () => {
+    const dir = readdirSync(f.dir, { recursive: true }).map(String).find(name => name.includes('task-'))!;
+    existing = join(f.dir, dir, 'attachment-image.png');
+    writeFileSync(existing, 'existing content');
+  }), { code: 'EEXIST' });
+  assert.equal(readFileSync(existing, 'utf8'), 'existing content');
+});
 
 test('image, audio and document messages upload ciphertext and preserve threads without reply quotes', async t => {
   const f = setup(t);
@@ -73,21 +127,21 @@ test('image, audio and document messages upload ciphertext and preserve threads 
 test('incoming encrypted image round-trips, preserves bytes and is stored privately', async t => {
   const f = setup(t);
   const file = f.encrypted(png);
-  const received = await f.media.receive({ msgtype: 'm.image', filename: '../../AGENTS.md', body: 'Describe this', file }, 'conversation', signal());
+  const received = await f.media.receive({ msgtype: 'm.image', filename: '../../AGENTS.md', body: 'Describe this', file }, 'conversation', signal(), async () => {});
   assert.equal(received.name, 'AGENTS.md');
   assert.ok(received.path.endsWith('/attachment-AGENTS.md'));
   assert.equal(received.image, true);
   assert.equal(received.mimetype, 'image/png');
   assert.deepEqual(readFileSync(received.path), png);
   assert.equal(statSync(received.path).mode & 0o777, 0o600);
-  const second = await f.media.receive({ msgtype: 'm.file', file, body: 'AGENTS.md' }, 'different conversation', signal());
+  const second = await f.media.receive({ msgtype: 'm.file', file, body: 'AGENTS.md' }, 'different conversation', signal(), async () => {});
   assert.notEqual(second.path, received.path);
 });
 
 test('incoming audio remains a local attachment and retains its declared audio type', async t => {
   const f = setup(t);
   const data = Buffer.from('voice recording');
-  const received = await f.media.receive({ msgtype: 'm.audio', body: 'Voice message', file: f.encrypted(data), info: { mimetype: 'audio/ogg' } }, 'conversation', signal());
+  const received = await f.media.receive({ msgtype: 'm.audio', body: 'Voice message', file: f.encrypted(data), info: { mimetype: 'audio/ogg' } }, 'conversation', signal(), async () => {});
   assert.equal(received.image, false); assert.equal(received.mimetype, 'audio/ogg');
   assert.deepEqual(readFileSync(received.path), data);
 });
@@ -95,17 +149,17 @@ test('incoming audio remains a local attachment and retains its declared audio t
 test('tampering, plaintext attachments, unsafe URLs and excessive declared sizes fail', async t => {
   const f = setup(t);
   const file = f.encrypted(png); f.corrupt();
-  await assert.rejects(f.media.receive({ file }, 'key', signal()), /decrypt or verify/);
-  await assert.rejects(f.media.receive({ url: 'https://example.test/file' }, 'key', signal()), /file encryption/);
-  await assert.rejects(f.media.receive({ file: { ...file, url: 'https://example.test/file' } }, 'key', signal()), /media URL/);
-  await assert.rejects(f.media.receive({ file, info: { size: 1025 } }, 'key', signal()), /limit/);
+  await assert.rejects(f.media.receive({ file }, 'key', signal(), async () => {}), /decrypt or verify/);
+  await assert.rejects(f.media.receive({ url: 'https://example.test/file' }, 'key', signal(), async () => {}), /file encryption/);
+  await assert.rejects(f.media.receive({ file: { ...file, url: 'https://example.test/file' } }, 'key', signal(), async () => {}), /media URL/);
+  await assert.rejects(f.media.receive({ file, info: { size: 1025 } }, 'key', signal(), async () => {}), /limit/);
   assert.equal(f.fetches(), 1);
 });
 
 test('actual download size is bounded even with absent or false size metadata', async t => {
   const f = setup(t, 4);
   const file = f.encrypted(Buffer.from('oversized'));
-  await assert.rejects(f.media.receive({ file, info: { size: 1 } }, 'key', signal()), /limit/);
+  await assert.rejects(f.media.receive({ file, info: { size: 1 } }, 'key', signal(), async () => {}), /limit/);
   let cancelled = false;
   const body = new ReadableStream<Uint8Array>({
     start(controller) { controller.enqueue(new Uint8Array(3)); controller.enqueue(new Uint8Array(3)); },

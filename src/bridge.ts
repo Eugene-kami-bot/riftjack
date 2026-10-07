@@ -1,7 +1,6 @@
 import type { BackgroundAction } from './background-tasks.js';
 import type { CompactionPhase } from './compaction-notices.js';
-import { roomMessageDelivery, type MessageRequest } from './room-messages.js';
-import type { ToolAction } from './tool-mcp.js';
+import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
 import type { SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
@@ -31,7 +30,7 @@ export type MatrixEvent = {
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: ToolAction };
+export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -46,7 +45,7 @@ type Options = {
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
-  receive?: (event: MatrixEvent, key: string, signal: AbortSignal) => Promise<IncomingAttachment>;
+  receive?: (event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>) => Promise<IncomingAttachment>;
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
@@ -340,12 +339,12 @@ export class Bridge {
               await o.compaction!(phase, { room, sender: current.sender });
             } catch (error) { o.report(error); }
           } : undefined,
-          roomMessages: messages ? async (input, callSignal) => {
+          roomMessages: messages ? async (input, callSignal, outbox) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();
             await this.authorize(room, current);
             signal.throwIfAborted();
-            return messages(input, signal);
+            return messages(input, signal, outbox);
           } : undefined,
           sendAttachments: o.sendAttachments ? async (files, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
@@ -458,7 +457,7 @@ export class Bridge {
     await this.authorize(room, active);
     if (!isMedia(event.content?.msgtype)) return [];
     if (!this.options.receive) throw new PublicError('Attachment reception is not configured.');
-    let file = await this.options.receive(event, active.key, active.controller.signal);
+    let file = await this.options.receive(event, active.key, active.controller.signal, () => this.authorize(room, active));
     await this.authorize(room, active);
     if (this.options.transcribe) {
       file = await this.options.transcribe(file, active.controller.signal);

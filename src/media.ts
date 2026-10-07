@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { mkdir, mkdtemp, open, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Attachment, EncryptedAttachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
@@ -176,7 +176,7 @@ type MediaOptions = { workspace: string; homeserver: string; accessToken: string
 export class MatrixMedia {
   constructor(private client: MediaClient, private options: MediaOptions, private fetcher: typeof fetch = fetch) {}
 
-  async receive(content: MediaContent, key: string, signal: AbortSignal): Promise<IncomingAttachment> {
+  async receive(content: MediaContent, key: string, signal: AbortSignal, authorize: () => Promise<void>): Promise<IncomingAttachment> {
     signal.throwIfAborted();
     const o = this.options;
     if (!content.file) throw new PublicError('Please send this attachment with file encryption enabled in your Matrix client.');
@@ -198,7 +198,18 @@ export class MatrixMedia {
     const name = safeName(content.filename || content.body || 'attachment');
     const dir = await mediaDirectory(o.workspace, 'incoming', o.scope + ':' + key);
     const path = join(dir, 'attachment-' + name);
-    await writeFile(path, data, { mode: 0o600, flag: 'wx' });
+    await authorize();
+    signal.throwIfAborted();
+    const handle = await open(path, 'wx', 0o600);
+    try {
+      signal.throwIfAborted();
+      await handle.writeFile(data, { signal });
+      await handle.close();
+    } catch (error) {
+      await handle.close().catch(() => {});
+      await rm(path, { force: true });
+      throw error;
+    }
     const detectedImage = imageMime(data);
     const declared = content.info?.mimetype;
     const mimetype = detectedImage || (declared && /^[\w.+-]+\/[\w.+-]+$/.test(declared) ? declared : fileMime(name, data));

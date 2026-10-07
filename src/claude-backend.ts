@@ -286,7 +286,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     };
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
-      if (hooks?.roomMessages) rooms = await startRoomMessageMcp(hooks.roomMessages, AbortSignal.any([signal, mediaLifetime.signal]));
+      if (hooks?.roomMessages) rooms = await startRoomMessageMcp((input, signal) => hooks.roomMessages!(input, signal, outbox), AbortSignal.any([signal, mediaLifetime.signal]));
       // The tool writes response files into the workspace, so a read-only bot does not get it.
       if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);

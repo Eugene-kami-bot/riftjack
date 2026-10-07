@@ -41,11 +41,28 @@ test('room MCP advertises mention and passes it through validated', async t => {
   t.after(() => server.close());
   const tools = (await (await post(server, 1, {}, 'tools/list')).json()).result.tools;
   assert.equal(tools[0].inputSchema.properties.mention.type, 'boolean');
+  assert.ok(tools[0].inputSchema.properties.action.enum.includes('receive_attachment'));
+  assert.ok(tools[0].inputSchema.properties.action.enum.includes('send_files'));
   assert.equal((await (await post(server, 2, { ...request, mention: true })).json()).result.isError, undefined);
   // A mentioning text must fit whole into the notice that quotes it.
   const long = (await (await post(server, 3, { ...request, id: 'long', text: 'x'.repeat(7000), mention: true })).json()).result;
   assert.equal(long.isError, true);
   assert.deepEqual(requests, [{ ...request, mention: true }]);
+});
+
+test('room MCP passes attachment retrieval and outbox file sends through validation', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'room-files-mcp-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const requests: unknown[] = [];
+  const action = roomMessageDelivery(async request => { requests.push(request); return '{}'; });
+  const server = await startRoomMessageMcp((input, signal) => action(input, signal, root), new AbortController().signal);
+  t.after(() => server.close());
+  const receive = { action: 'receive_attachment', room: '!shared:test', event_id: '$image' };
+  const files = { action: 'send_files', room: '!shared:test', id: 'files', files: [{ path: 'sample.txt' }] };
+  assert.equal((await (await post(server, 1, receive)).json()).result.isError, undefined);
+  for (const id of [2, 3]) assert.equal((await (await post(server, id, files)).json()).result.isError, undefined);
+  assert.equal((await (await post(server, 4, { ...files, id: 'bad', files: [{ path: '../secret' }] })).json()).result.isError, true);
+  assert.deepEqual(requests, [receive, { ...files, outbox: root }]);
 });
 
 for (const kind of ['codex', 'claude'] as const) test(`${kind} sends room messages before replying and closes the tool on resumed turns`, { timeout: 25_000 }, async t => {
@@ -68,6 +85,11 @@ async function work(){
  const listed=(await call(1,{action:'list'})).rooms;
  if(listed[0].room!=='!shared:test'||listed[0].type!=='shared'||listed[1].type!=='private') throw Error('Missing room');
  for(const id of [2,3]) if((await call(id,${JSON.stringify(request)})).event_id!=='$sent') throw Error('Missing receipt');
+ const received=await call(4,{action:'receive_attachment',room:'!shared:test',event_id:'$file'});
+ if(fs.readFileSync(received.file.path,'utf8')!=='Shared file') throw Error('Missing received file');
+ const outbox=JSON.parse(instructions.match(/outbox: ("[^"\\n]+")/)[1]);
+ fs.copyFileSync(received.file.path,outbox+'/sample.txt');
+ for(const id of [5,6]) if((await call(id,{action:'send_files',room:'!shared:test',id:'file',files:[{path:'sample.txt'}]})).files[0].status!=='sent') throw Error('Missing file receipt');
  fs.writeFileSync(__filename+'.completed','yes');
  return 'Delivered.';
 }
@@ -104,6 +126,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
 `, { mode: 0o700 });
   const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test', RIFTJACK_WORKSPACE: root, CODEX_PATH: cli, CLAUDE_PATH: cli });
   const state = new State(join(root, 'state.json')), backend = createBackend(config, state);
+  const incoming = join(root, 'shared.txt'); writeFileSync(incoming, 'Shared file');
   const order: string[] = [];
   const bridge = new Bridge({ botId: '@bot:test', kind, since: 0, timeoutMs: 15_000, state,
     isAuthorized: () => true, isPrivateRoom: async () => true, run: backend,
@@ -111,6 +134,17 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
     roomMessages: async (request, context) => {
       assert.equal(context.room, '!home:test');
       if (request.action === 'list') return JSON.stringify({ rooms: [{ room: '!shared:test', type: 'shared' }, { room: '!home:test', type: 'private' }] });
+      if (request.action === 'receive_attachment') {
+        assert.equal(request.event_id, '$file');
+        return JSON.stringify({ status: 'received', file: { path: incoming, name: 'shared.txt', image: false } });
+      }
+      if (request.action === 'send_files') {
+        assert.equal(readFileSync(join(request.outbox, request.files[0].path), 'utf8'), 'Shared file');
+        assert.ok(request.outbox.startsWith(join(root, '.matrix-media', 'outgoing')));
+        order.push('File sent');
+        return JSON.stringify({ room: request.room, files: [{ path: request.files[0].path, status: 'sent' }] });
+      }
+      if (request.action !== 'send') throw new Error('Unexpected room action');
       assert.equal(request.room, '!shared:test');
       assert.throws(() => readFileSync(cli + '.completed'));
       order.push(request.text);
@@ -122,7 +156,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
     rmSync(cli + '.completed', { force: true }); order.length = 0;
     await bridge.handle('!home:test', { type: 'm.room.message', event_id: '$' + n, sender: '@alice:test', origin_server_ts: Date.now(),
       content: { msgtype: 'm.text', body: 'Share the result.' } });
-    assert.deepEqual(order, ['…', 'Ready.', 'Delivered.']);
+    assert.deepEqual(order, ['…', 'Ready.', 'File sent', 'Delivered.']);
   }
   const connections = readFileSync(cli + '.connections', 'utf8').trim().split('\n').map(s => JSON.parse(s));
   assert.equal(connections.length, 2);
