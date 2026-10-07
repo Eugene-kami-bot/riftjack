@@ -21,6 +21,36 @@ function reaction(target: string, key = '✅', id = '$reaction'): MatrixEvent {
     content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: target, key } } };
 }
 
+test('typing covers backend work and final delivery, but not local commands or denied messages', async t => {
+  const calls: boolean[] = [], ready = gate(), finish = gate();
+  const f = fixture(t, 'codex', async () => { ready.release(); await finish.promise; return 'done'; }, true, {
+    typing: async (_room, typing) => { calls.push(typing); },
+    reply: async (_room, _event, text) => { if (text === 'done') assert.equal(calls.at(-1), true); },
+  });
+  await f.bridge.handle('!dm:test', event('!status', '$status'));
+  await f.bridge.handle('!dm:test', { ...event('hello', '$denied'), sender: '@other:test' });
+  assert.deepEqual(calls, []);
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  assert.deepEqual(calls, [true]);
+  finish.release(); await task;
+  assert.deepEqual(calls, [true, false]);
+});
+
+for (const end of ['failure', 'cancel', 'stop'] as const) test(`typing clears after task ${end}`, async t => {
+  const calls: boolean[] = [], ready = gate();
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal) => {
+    ready.release();
+    if (end === 'failure') throw new Error('failed');
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    signal.throwIfAborted(); return 'done';
+  }, true, { typing: async (_room, typing) => { calls.push(typing); } });
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  if (end === 'cancel') await f.bridge.handle('!dm:test', event('!cancel', '$cancel'));
+  if (end === 'stop') f.bridge.stop();
+  await task;
+  assert.deepEqual(calls, [true, false]);
+});
+
 test('manager accepts avatar names and reports target errors before downloading images', async t => {
   let accounts!: Accounts, downloads = 0;
   const f = fixture(t, 'manager', undefined, true, {

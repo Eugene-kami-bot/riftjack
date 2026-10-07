@@ -1,5 +1,6 @@
 import type { BackgroundAction } from './background-tasks.js';
 import type { CompactionPhase } from './compaction-notices.js';
+import { taskTyping } from './task-typing.js';
 import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
 import type { SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
@@ -44,6 +45,7 @@ type Options = {
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
+  typing?: (room: string, typing: boolean, timeout: number) => Promise<unknown>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>) => Promise<IncomingAttachment>;
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
@@ -283,6 +285,8 @@ export class Bridge {
     const current: Active = { room, event, key, backendKey, sender: event.sender, controller, running: false, failed: false,
       ready, markReady, publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
     this.active = current;
+    const stopTyping = o.typing ? taskTyping((typing, timeout) => o.typing!(room, typing, timeout),
+      async () => await o.isPrivateRoom(room, current.sender) && o.isAuthorized(current.sender), o.report, controller.signal) : undefined;
     let timedOut = false;
     const timeout = setTimeout(() => {
       if (controller.signal.aborted) return;
@@ -419,6 +423,7 @@ export class Bridge {
     } finally {
       current.interactions.close();
       clearTimeout(timeout);
+      await stopTyping?.();
       this.active = undefined;
       void this.drainQueued().catch(o.report);
     }

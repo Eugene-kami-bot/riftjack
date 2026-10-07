@@ -272,3 +272,18 @@ The default and maximum limit is **512 MiB per attachment** (536,870,912 bytes).
 Outgoing attachments are read and encrypted in bounded chunks while uploading. `MEDIA_UPLOAD_TIMEOUT_SECONDS` sets the overall upload deadline (default: 1800 seconds, range: 1–86400). Cancellation stops the upload; failed uploads are not retried automatically. The supervisor log records `media-upload` start, completion, or failure with a transfer ID, file size, ciphertext bytes read, and elapsed milliseconds. The duration covers reading, encryption, upload, and the server response, not the recipient's download. HTTP status codes and safe network error codes are reported without filenames, access tokens, encryption keys, or server response bodies. Incoming downloads and the external worker's JSON/base64 interface still buffer data in memory.
 
 Files are kept under each bot’s workspace in `.matrix-media/`, in separate incoming and outgoing directories, with private filesystem permissions. Outgoing files must be regular files inside the current turn's outbox; symlinks, hard links, and paths outside it are rejected. Files remain available for follow-up questions and are not deleted by `!reset`. Remove old media manually when it is no longer needed. Bots assigned the same workspace share its filesystem; media directories are not an isolation boundary between allowed users. Add `.matrix-media/` to each selected repository’s ignore rules. A read-only Codex sandbox can inspect incoming attachments but cannot create new outbox files.
+
+## Task activity indicator
+
+For Codex, Claude and Bot Manager, “typing” means the bot is processing a request
+or awaiting confirmation within that request. The standard Matrix indicator
+covers an active task, including tool calls, preparation and final delivery. Local
+commands such as `!status` do not start it. The connector renews the indicator
+every 15 seconds with a 30-second server expiry and clears it on completion,
+cancellation or failure. After a crash it expires without a cleanup request.
+Access is checked before each update; indicator errors do not fail the task.
+
+The indicator belongs to the room, not an individual thread. Element controls
+how it is displayed, and clients may hide it. It indicates an active run, not
+continuous model output or completion of the objective; an active run waiting
+for confirmation still counts as active. No persistent status message is added.
