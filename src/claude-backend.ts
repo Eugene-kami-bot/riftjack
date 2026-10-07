@@ -1,4 +1,5 @@
 import { routingInstructions } from './routing-instructions.js';
+import { claudeAuthenticationFailure } from './auth-diagnostics.js';
 import { compactionNotices } from './compaction-notices.js';
 import { contextCheckpoints, checkpointDelivery, checkpointInstructions, claudeCheckpointHooks } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
@@ -376,7 +377,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       // CLI-generated messages describe its own state; they are not model output.
       // Do not infer this from text: the model may legitimately quote that text.
       if (message.type === 'assistant' && message.error === 'authentication_failed') {
-        throw new PublicError('Claude Code could not authenticate this task. Check claude auth status on the host and sign in again if needed. The task was not retried automatically.');
+        const diagnostic = claudeAuthenticationFailure(message.message?.content);
+        throw new PublicError(`Claude Code could not authenticate this task. Diagnostic: ${diagnostic}. Check claude auth status on the host and sign in again if needed. The task was not retried automatically.`);
       }
       if (message.type === 'assistant' && message.message?.model === '<synthetic>') {
         lastAssistantWasSynthetic = true;

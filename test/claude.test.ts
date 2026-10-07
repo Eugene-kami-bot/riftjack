@@ -126,7 +126,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     return;
   }
   if (prompt.includes('[auth-error]')) {
-    synthetic('Not logged in · Please run /login', { error: 'authentication_failed', isApiErrorMessage: true });
+    synthetic(prompt.includes('[auth-http]') ? 'API Error: 401 private-token-secret' : prompt.includes('[auth-unknown]') ? 'private-token-secret' : 'Not logged in · Please run /login', { error: 'authentication_failed', isApiErrorMessage: true });
     finish('Not logged in · Please run /login'); return;
   }
   if (prompt.includes('[synthetic-error]')) {
@@ -138,8 +138,8 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     if (prompt.includes('[synthetic-only]')) { finish('No response requested.'); return; }
     if (prompt.includes('[synthetic-fallback]')) { finish(); return; }
   }
-  if (prompt.includes('[quote-placeholder]')) {
-    const text = 'No response requested.';
+  if (prompt.includes('[quote-placeholder]') || prompt.includes('[quote-auth]')) {
+    const text = prompt.includes('[quote-auth]') ? 'Not logged in · Please run /login' : 'No response requested.';
     output({ type: 'assistant', message: { model: 'real-model', content: [{ type: 'text', text }] } });
     finish(text); return;
   }
@@ -624,7 +624,6 @@ test('Claude status uses init metadata, preserves unknowns and clears stale fiel
   assert.equal(f.state.session('key').claudeReport, undefined);
 });
 
-
 test('Claude sends progress around tool use without duplicating final text or exposing thinking', async t => {
   const f = setup(t);
   const updates: string[] = [];
@@ -698,4 +697,23 @@ for (const unfinished of [false, true]) test(`Claude compaction notifications, u
   await f.backend('claude', '[compact]' + (unfinished ? '[unfinished]' : ''), 'key', signal(), '@owner:test', [], undefined, undefined,
     { compaction: async phase => { phases.push(phase); } });
   assert.deepEqual(phases, unfinished ? ['started', 'unconfirmed'] : ['started', 'completed', 'started', 'completed']);
+});
+
+for (const [suffix, reason] of [['', 'not-logged-in'], [' [auth-http]', 'http-unauthorized'], [' [auth-unknown]', 'unclassified']]) {
+  test('Claude auth diagnostics retain only an allowed category: ' + reason, async t => {
+    const f = setup(t), updates: string[] = [];
+    await assert.rejects(f.backend('claude', '[auth-error]' + suffix, 'auth-diagnostic', signal(), '@owner:test', [], undefined, undefined,
+      { progress: async text => { updates.push(text); } }), error => {
+      assert.match(String(error), new RegExp('Diagnostic: ' + reason));
+      assert.doesNotMatch(String(error), /private-token-secret/);
+      return true;
+    });
+    assert.deepEqual(updates, []);
+    assert.equal(f.calls().filter(call => call.input).length, 1);
+  });
+}
+
+test('Claude model text quoting an auth diagnostic remains ordinary output', async t => {
+  const f = setup(t);
+  assert.equal(await f.backend('claude', '[quote-auth]', 'quote-auth', signal(), '@owner:test'), 'Not logged in · Please run /login');
 });

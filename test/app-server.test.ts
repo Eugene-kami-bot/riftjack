@@ -14,7 +14,7 @@ function fixture(t: { after(fn: () => unknown): void }) {
 const readline = require('node:readline');
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line);
-  if (request.params?.reject) return process.stdout.write(JSON.stringify({ id: request.id, error: { code: request.params.code, message: 'private server diagnostic with a secret' } }) + '\\n');
+  if (request.params?.reject) return process.stdout.write(JSON.stringify({ id: request.id, error: { code: request.params.code, message: request.params.message ?? 'private server diagnostic with a secret', data: { token: 'private-data-secret' } } }) + '\\n');
   if (request.method === 'exit') process.exit(17);
   if (request.method === 'malformed') return process.stdout.write('private diagnostic, not JSON\\n');
   if (request.method === 'initialize') process.stdout.write(JSON.stringify({ id: request.id, result: {} }) + '\\n');
@@ -79,5 +79,33 @@ test('RPC rejections identify the operation and code without exposing server dia
     assert.equal(errorMessage(error), 'Codex App Server rejected turn/start.');
     return true;
   });
+  await server.initialize();
+});
+
+test('account failures preserve known reasons while discarding sensitive suffixes and error data', async t => {
+  const { server } = fixture(t);
+  await server.initialize();
+  const secret = 'private@example.test Bearer private-token /private/auth.json';
+  const prefix = 'Your access token could not be refreshed';
+  for (const [message, reason] of [
+    ['failed to load auth: ' + secret, 'auth-load-failed'],
+    [prefix + ' because your refresh token has expired. ' + secret, 'refresh-token-expired'],
+    ['failed to load auth: ' + prefix + ' because your refresh token was already used. ' + secret, 'refresh-token-reused'],
+    [prefix + ' because your refresh token was revoked. ' + secret, 'refresh-token-revoked'],
+    [prefix + ' because you have since logged out or signed in to another account. ' + secret, 'auth-account-changed'],
+    [prefix + '. ' + secret, 'auth-refresh-failed'],
+    [secret + ' failed to load auth: ', 'unclassified'],
+    [{ token: secret }, 'unclassified'],
+    ['failed to load auth: ' + 'x'.repeat(16384), 'unclassified'],
+  ] as const) {
+    await assert.rejects(server.request('account/read', { reject: true, code: -32603, message }), error => {
+      assert.equal(errorMessage(error), `Codex App Server rejected account/read (RPC -32603). Diagnostic: ${reason}.`);
+      assert.doesNotMatch(String(error), /private|Bearer|@example/);
+      return true;
+    });
+  }
+  // A matching phrase in another operation is not evidence of an account failure.
+  await assert.rejects(server.request('turn/start', { reject: true, code: -32603, message: 'failed to load auth: ' + secret }),
+    { message: 'Codex App Server rejected turn/start (RPC -32603).' });
   await server.initialize();
 });

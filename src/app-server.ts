@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import type { Config } from './config.js';
 import { deniedRequest } from './codex-interactions.js';
 import { PublicError } from './errors.js';
+import { codexAccountFailure } from './auth-diagnostics.js';
 
 export type AgentMessage = { type: string; id: string; text?: string; phase?: string | null };
 export type Turn = { id: string; status: string; items?: AgentMessage[] };
@@ -21,9 +22,11 @@ export class RpcError extends PublicError {
     // Map only a known server error; never forward arbitrary diagnostics to chat.
     const busy = code === -32600 && typeof message === 'string' &&
       /^thread [a-zA-Z0-9_-]+ already has an active writer$/.test(message);
+    const detail = code === -32603 && method === 'account/read'
+      ? ` Diagnostic: ${codexAccountFailure(message)}.` : '';
     super(busy
       ? 'This conversation is already open in another Codex process. Close it in the Codex app or finish the other active session, then retry in Matrix. No conversation reset is needed.'
-      : `Codex App Server rejected ${operationName(method)}${Number.isSafeInteger(code) ? ` (RPC ${code})` : ''}.`);
+      : `Codex App Server rejected ${operationName(method)}${Number.isSafeInteger(code) ? ` (RPC ${code})` : ''}.${detail}`);
   }
 }
 

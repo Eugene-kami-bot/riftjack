@@ -55,3 +55,19 @@ conversation data; use SSH or HTTPS between machines. The listener is disabled
 by default and binds to loopback when enabled. Worker tools and approvals are
 controlled by the remote environment, not by Riftjack's local sandbox. See
 [worker setup and delivery guarantees](grok.md).
+
+## Authentication diagnostics
+
+Codex `account/read` internal errors and Claude's structured
+`authentication_failed` events include a fixed `Diagnostic` category in chat
+and the existing connector error log. Known messages distinguish loading auth,
+refresh-token failures, an account change, a missing Claude login, and Claude
+HTTP 401/403 responses. These are classifications of what the CLI reported,
+not independently verified causes. Unknown, malformed or oversized messages
+report `unclassified`; a generic RPC -32603 does not establish an auth failure.
+
+Raw RPC error text, error data and CLI stderr are not retained or forwarded.
+Categories contain no account identifiers, paths, tokens or response bodies.
+There is no automatic retry, token refresh, logout or conversation reset.
+After recovery, the original cause may remain unknown if the CLI message was
+not recognized. A restart restoring service is not proof of a permanent fix.
