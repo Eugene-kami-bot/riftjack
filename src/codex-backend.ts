@@ -12,6 +12,7 @@ import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
+import { OwnerDiagnosticError } from './errors.js';
 import { mediaInstructions, outboxDirectory, parseMediaReply, type IncomingAttachment } from './media.js';
 import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } from './app-server.js';
 import { codexInteraction } from './codex-interactions.js';
@@ -228,7 +229,9 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           : completed.status === 'failed' && completed.error?.codexErrorInfo === 'cyberPolicy'
             ? 'Codex stopped this task because its safety filter flagged a possible cybersecurity risk (cyberPolicy).'
             : 'Codex task failed.';
-        throw new PublicError(message);
+        const details = [completed.error?.message, completed.error?.additionalDetails]
+          .filter((value): value is string => typeof value === 'string').join('\n\n');
+        throw new OwnerDiagnosticError(message, details);
       }
       for (const item of completed.items || []) if (item.type === 'agentMessage') current.messages.set(item.id, item);
       const messages = [...current.messages.values()].filter(item => item.phase !== 'commentary');

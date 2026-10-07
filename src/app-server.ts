@@ -2,11 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Config } from './config.js';
 import { deniedRequest } from './codex-interactions.js';
-import { PublicError } from './errors.js';
+import { PublicError, OwnerDiagnosticError } from './errors.js';
 import { codexAccountFailure } from './auth-diagnostics.js';
 
 export type AgentMessage = { type: string; id: string; text?: string; phase?: string | null };
-export type Turn = { id: string; status: string; items?: AgentMessage[]; error?: { codexErrorInfo?: unknown } | null };
+export type Turn = { id: string; status: string; items?: AgentMessage[]; error?: { codexErrorInfo?: unknown; message?: unknown; additionalDetails?: unknown } | null };
 export type Notification = { method: string; params: { threadId?: string; turnId?: string; turn?: Turn; item?: AgentMessage; requestId?: string | number; tokenUsage?: { last?: { totalTokens?: number }; modelContextWindow?: number | null } } };
 export type ServerRequest = { id: string | number; method: string; params: Record<string, any> };
 export type RequestHandler = (request: ServerRequest, signal: AbortSignal) => Promise<object | undefined>;
@@ -17,16 +17,17 @@ const operations = new Set(['initialize', 'account/read', 'account/rateLimits/re
   'thread/resume', 'thread/inject_items', 'turn/start', 'turn/steer', 'turn/interrupt', 'plugin/read', 'plugin/install']);
 const operationName = (method: string) => operations.has(method) ? method : 'request';
 
-export class RpcError extends PublicError {
+export class RpcError extends OwnerDiagnosticError {
   constructor(readonly code: number, message?: unknown, method = 'request') {
-    // Map only a known server error; never forward arbitrary diagnostics to chat.
+    // Public replies classify known errors; the owner-only route retains the original text.
     const busy = code === -32600 && typeof message === 'string' &&
       /^thread [a-zA-Z0-9_-]+ already has an active writer$/.test(message);
     const detail = code === -32603 && method === 'account/read'
       ? ` Diagnostic: ${codexAccountFailure(message)}.` : '';
     super(busy
       ? 'This conversation is already open in another Codex process. Close it in the Codex app or finish the other active session, then retry in Matrix. No conversation reset is needed.'
-      : `Codex App Server rejected ${operationName(method)}${Number.isSafeInteger(code) ? ` (RPC ${code})` : ''}.${detail}`);
+      : `Codex App Server rejected ${operationName(method)}${Number.isSafeInteger(code) ? ` (RPC ${code})` : ''}.${detail}`,
+      typeof message === 'string' ? message : '');
   }
 }
 

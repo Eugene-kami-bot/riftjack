@@ -1,5 +1,6 @@
 import { linkedRoomMessages } from './room-messages.js';
 import { sendCompactionNotice } from './compaction-notices.js';
+import { sendOwnerDiagnostic } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
@@ -243,6 +244,12 @@ async function main() {
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
+      ownerDiagnostic: (error, { room, sender }) => sendOwnerDiagnostic(error, sender, access.owner,
+        linkedAgent?.home ?? room, {
+          allowed: target => isPrivateRoom(client, target, account.userId, access.owner, authorized),
+          stopping: () => stopping,
+          send: (target, content) => client.sendMessage(target, content),
+        }),
       compaction: (phase, { room, sender }) => sendCompactionNotice(phase,
         linkedAgent?.home ?? room, {
           // Use the strict two-person check here, not privateRoom which also

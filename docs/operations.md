@@ -36,7 +36,15 @@ A Codex task stopped with `cyberPolicy` is reported as a safety-filter decision
 about possible cybersecurity risk. It does not mean the connector crashed or
 authentication failed. Riftjack does not retry the task automatically or reset
 the conversation. Other unclassified turn failures use a generic failure message;
-raw server error messages and additional details are not forwarded to chat.
+raw server error messages and additional details stay out of shared replies and
+host logs. For tasks requested by the installation owner, Riftjack also sends
+the full original Codex turn error (`message` and `additionalDetails`) or RPC
+error message to the owner's encrypted two-person chat. Linked agents use their
+configured home chat; other bots use the requesting chat only if it passes the
+same privacy check. Diagnostics are plain service messages, split without
+truncation, with access checked before each part. They do not trigger an agent
+turn. If private delivery fails, Riftjack keeps the short task failure and does
+not retry the diagnostic automatically or fall back to the shared room.
 
 ## Crash recovery and rollback
 

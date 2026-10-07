@@ -12,6 +12,7 @@ import { Bridge, type MatrixEvent } from '../src/bridge.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { codexUsage } from '../src/codex-usage.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
+import { OwnerDiagnosticError } from '../src/errors.js';
 
 function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-app-server-'));
@@ -378,6 +379,8 @@ test('Codex reports structured cyber policy failures without exposing diagnostic
     await assert.rejects(f.backend('codex', prompt, 'conversation', signal(), '@owner:test'), error => {
       assert.match(String(error), /safety filter.*possible cybersecurity risk.*cyberPolicy/);
       assert.doesNotMatch(String(error), /private|retry/i);
+      assert.ok(error instanceof OwnerDiagnosticError);
+      assert.equal(error.ownerDetails(), 'private diagnostic\n\nprivate details');
       return true;
     });
     assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);

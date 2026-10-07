@@ -41,6 +41,7 @@ type Options = {
   steer?: Steer;
   queuedUpdateMessage?: string;
   owner?: string;
+  ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
@@ -408,6 +409,10 @@ export class Bridge {
       current.markReady();
       while (current.buffered) await current.steering;
       o.report(error);
+      if (current.sender === o.owner && o.isAuthorized(current.sender)) {
+        try { await o.ownerDiagnostic?.(error, { room, sender: current.sender }); }
+        catch (deliveryError) { o.report(deliveryError); }
+      }
       await reply(controller.signal.aborted
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));

@@ -1,6 +1,16 @@
 // Only deliberately authored messages may be shown verbatim in chat or logs.
 export class PublicError extends Error {}
 
+// Provider text stays separate from the public message used in rooms and host logs.
+export class OwnerDiagnosticError extends PublicError {
+  readonly #details: string;
+  constructor(message: string, details: string) {
+    super(message);
+    this.#details = details;
+  }
+  ownerDetails(): string { return this.#details; }
+}
+
 const codes = new Set([
   'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT',
   'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'EPERM', 'EACCES', 'ENOENT',
