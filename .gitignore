@@ -18,6 +18,7 @@ coverage/
 data/
 .matrix-media/
 .connector-history/
+.riftjack/checkpoints/
 accounts.json
 allowed-users.json
 sessions.json

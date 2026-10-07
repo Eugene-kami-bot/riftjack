@@ -1,5 +1,6 @@
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
+import { contextCheckpoints, checkpointDelivery, checkpointInstructions } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
@@ -222,7 +223,11 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     signal.throwIfAborted();
     if (!checked) { ({ replay, systemPromptSnapshot } = await checkClaude(config, signal)); checked = true; }
     const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
-    const input = await claudeInput(prompt, attachments, config);
+    const savedSession = state.session(key).claude;
+    let checkpoint = savedSession ? contextCheckpoints(state, key, 'claude', config.workspace, savedSession) : undefined;
+    let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
+    const initialCheckpoint = checkpoint?.notice();
+    const input = await claudeInput(prompt + (initialCheckpoint ? '\n\n' + initialCheckpoint.text : ''), attachments, config);
     // An update is confirmed only when Claude echoes its UUID. Without the echo,
     // delivery is uncertain: it is never resent automatically.
     const updates = new Map<string, { resolve: (accepted: boolean) => void; reject: (error: unknown) => void }>();
@@ -241,6 +246,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       stdinRef.write({ type: 'user', uuid, message });
       return acknowledged;
     };
+    if (checkpoint) checkpointSender = checkpointDelivery(checkpoint, text => steerHere(text, [], signal));
     live.set(key, steerHere);
     let assistantText = '';
     let lastAssistantWasSynthetic = false;
@@ -257,7 +263,6 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       pendingProgress = '';
     };
     let sessionId: string | undefined;
-    const savedSession = state.session(key).claude;
     const interactive = !!interact && claudeApprovals(config);
     // Open confirmations by Claude request ID; aborted when Claude withdraws them or the turn ends.
     const pending = new Map<string, AbortController>();
@@ -291,7 +296,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
           + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
@@ -300,6 +305,10 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         if (sessionId !== message.session_id) {
           sessionId = message.session_id;
           state.update(key, { claude: sessionId });
+          if (!checkpoint) {
+            checkpoint = contextCheckpoints(state, key, 'claude', config.workspace, message.session_id);
+            checkpointSender = checkpointDelivery(checkpoint, text => steerHere(text, [], signal));
+          }
         }
       }
       // Only the replayed copy of an update we wrote confirms it; tool results are also user messages.
@@ -319,10 +328,11 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       }
       if (message.type === 'system' && !message.parent_tool_use_id) {
         if (message.subtype === 'status' && message.status === 'compacting') {
-          if (!compacting) { compacting = true; compactions.start(String(++compactId)); }
+          if (!compacting) { compacting = true; compactions.start(String(++compactId)); checkpoint?.start(); }
         }
         if (message.subtype === 'compact_boundary' && compacting) {
           compactions.complete(String(compactId)); compacting = false;
+          checkpoint?.complete(); checkpointSender?.flush();
         }
         // A null status also occurs for permission-mode changes; it is not
         // evidence that compaction succeeded. Only compact_boundary is.
@@ -365,6 +375,11 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         return;
       }
       if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
+        if (!message.parent_tool_use_id) {
+          if (initialCheckpoint) checkpoint?.delivered(initialCheckpoint.id);
+          checkpoint?.claudeUsage(message.message?.model, message.message?.usage);
+          checkpointSender?.flush();
+        }
         lastAssistantWasSynthetic = false;
         flushProgress();
         assistantText = message.message.content.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n');
@@ -374,6 +389,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       if (message.type === 'result') {
         if (lastAssistantWasSynthetic) throw new PublicError('Claude Code ended with a service message instead of a model response. Check its login on the host before retrying.');
         if (message.is_error || message.subtype !== 'success') throw new PublicError('Claude could not complete the task. Check your Claude account limits, permissions and login on the host.');
+        if (initialCheckpoint) checkpoint?.delivered(initialCheckpoint.id);
+        checkpoint?.claudeCapacity(message.modelUsage);
         results.push(typeof message.result === 'string' ? message.result : assistantText);
         accepting = false;
         // An update written just before the result may still start one more
@@ -388,6 +405,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
       close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await web?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();
+      await checkpointSender?.settled();
     }
     signal.throwIfAborted();
     if (!results.length || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');

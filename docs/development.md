@@ -57,8 +57,8 @@ Each command runs a separate Node process with a loopback HTTP receiver and veri
 ## Routing context
 
 Stable Matrix routing rules live in `routing-instructions.ts`. Codex receives them
-as developer instructions on thread start and resume; the existing instruction
-hash also updates older sessions once. Claude receives them through
+as developer instructions on thread start; resumed histories retain them, and
+the instruction hash adds an update only when they change. Claude receives them through
 `--append-system-prompt` on every process start, including resume. When the CLI
 advertises `--system-prompt-snapshot`, the backend sets it to `off` so an old
 snapshot cannot silently override updated connector instructions. They are not
@@ -83,5 +83,38 @@ Repeated starts/completions are suppressed within a backend call. Only an
 observed completion is reported as successful; a run ending while compaction is
 pending reports that completion was not confirmed. A hard connector crash cannot
 send that final notice. Delivery failures are reported without interrupting the
-agent, and uncertain sends are not retried. These notifications do not yet ask
-the agent to save or reload memory.
+agent, and uncertain sends are not retried.
+
+## Continuity notes
+
+The Codex and Claude adapters send a separate agent reminder when the latest
+reported context usage reaches 65% of a known model window. This is an early
+warning, not a promise that compaction is imminent or can be delayed. A large
+tool response or a CLI-specific threshold can still cause compaction first.
+Codex uses `thread/tokenUsage/updated.last.totalTokens` and `modelContextWindow`,
+not cumulative usage. Claude uses a main-agent assistant message's input tokens,
+including cache reads and creation, and the matching model's `contextWindow`
+reported in `result.modelUsage`. It does not guess capacity from model names.
+Claude's first run may have no known window until the result; a needed reminder
+then accompanies the next ordinary input. Older CLIs without usage/capacity
+fields cannot provide an early warning.
+
+The reminder supplies a session-specific file under
+`<workspace>/.riftjack/checkpoints/`. The agent chooses the content and writes it
+with its own tools, subject to existing sandbox and approval rules. The
+connector never reads or writes note content, grants filesystem access, or
+asserts that a note was actually saved. Read-only agents must respect their
+write restriction. Notes can refer to existing personal memory, but are not
+new instructions or authorization and should stay out of project commits.
+Separate backend/session identifiers give separate paths; resetting a session
+does not adopt the previous session's note. Files remain until the agent or
+human removes them. A shared workspace is not filesystem privacy isolation.
+
+After an observed start/completion pair, the adapter asks the agent to read its
+note if present, check freshness, and resume the existing task. The reminder
+uses live steering (Claude requires replay acknowledgements). If delivery is
+not accepted or is uncertain, it remains pending for the next ordinary input;
+there is no autonomous extra model run or retry loop. State survives connector
+restarts. Replayed completion events alone do not produce a restore reminder.
+An unobserved compaction during a connector crash cannot trigger restoration.
+The existing human-facing private compaction notices are unchanged.

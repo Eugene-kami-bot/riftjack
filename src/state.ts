@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EngineReport } from './bot-status.js';
+import type { CheckpointState } from './context-checkpoints.js';
 import { AGENT_TRIGGER, NOTICE, type MatrixEvent } from './bridge.js';
 
-export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport };
+export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport; codexCheckpoint?: CheckpointState; claudeCheckpoint?: CheckpointState };
 type Pending = { room: string; event: MatrixEvent; feedback: boolean };
 type Data = { version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]> };
 
