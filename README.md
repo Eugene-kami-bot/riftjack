@@ -18,7 +18,7 @@ Use Element X or another Matrix client. Accept your bot’s encrypted chat invit
 
 You can send text, images, documents, and audio files, and receive files back. Codex and Claude can deliver ready files while continuing to work. Images reach the agent as image inputs; documents and audio are provided as local files. Audio transcription depends on the agent’s available tools.
 
-Messages sent while Codex works can steer its active task. Claude queues them as follow-ups. When an action needs permission, the bot brings the request into the same conversation. Approve the displayed request with `!approve` or ✅, or decline with `!deny` or ❌.
+Messages sent while Codex works can steer its active task. Claude also accepts updates into its running task when its CLI supports message replay; otherwise it queues follow-ups. See [messages during work](docs/chat.md#messages-during-work). When an action needs permission, the bot brings the request into the same conversation. Approve the displayed request with `!approve` or ✅, or decline with `!deny` or ❌.
 
 A separate **Bot Manager** creates bots, selects their workspaces, and controls who can talk to them. It handles commands locally without calling a model:
 
@@ -32,14 +32,14 @@ The manager shows the workspace path for confirmation before creating a bot. Eac
 
 ## What you need
 
-- **Node.js 24 or newer** on the computer where the agents will work. Keep that computer and Riftjack running to keep the bots reachable.
+- **Node.js 24 or newer**, **Python 3**, and **lsof** on the computer where the agents will work. The host launcher uses Python and lsof to replace an existing instance safely. Keep that computer and Riftjack running to keep the bots reachable.
 - **A Synapse Matrix server you administer**, with native account registration and login. Provisioning needs an admin token or shared registration secret. Matrix Authentication Service is not supported by the provisioning adapter.
 - **A Matrix account and client**, such as Element X, for your conversations.
 - **At least one agent:** Codex signed in with a ChatGPT account, Claude Code signed in with a Claude account, or a Grok worker running in its own environment. Only your chosen provider is needed.
 
 Install your chosen CLI separately: [Codex](https://developers.openai.com/codex/cli) or [Claude Code](docs/claude.md). Riftjack does not install or update either engine. Each uses its own account and usage limits. No model-provider API key is needed.
 
-Riftjack makes outbound connections to Matrix. Codex and Claude need no inbound listener. External workers use an optional loopback HTTP interface, reachable locally or through an SSH tunnel; see [Grok setup](docs/grok.md).
+Riftjack makes outbound connections to Matrix. Codex and Claude need no publicly reachable inbound port. Connector MCP tools use authenticated, temporary HTTP listeners on loopback. External workers use an optional loopback HTTP interface, reachable locally or through an SSH tunnel; see [Grok setup](docs/grok.md).
 
 ## First run
 
@@ -122,7 +122,7 @@ Send these commands in the bot’s chat or thread:
 | `!usage` | Show the provider account’s usage limits. Owner only. |
 | `!restart` | Reload Riftjack and all bots when idle. Owner only. |
 
-Bots respond in encrypted two-person rooms with authorized accounts. The initial owner manages access through Bot Manager. For example, `allow bot Builder for @friend:example.org` grants access to that bot and sends a private chat invitation.
+By default, bots respond in encrypted two-person rooms with authorized accounts. [Linked conversations](docs/shared-conversations.md) can continue an existing agent session across its private chat and an explicitly configured shared room. The initial owner manages access through Bot Manager. For example, `allow bot Builder for @friend:example.org` grants access to that bot and sends a private chat invitation.
 
 Built-in messages, help and manager commands use English. Agent conversations can use your language.
 
@@ -136,7 +136,7 @@ See [working through Matrix](docs/chat.md) for confirmations, attachments, plugi
 
 **Approvals apply to the displayed request.** Codex defaults to a workspace-write sandbox with command network access disabled and approval requests routed to Matrix. Claude uses its own sandbox and permission settings. You can set either backend’s approval policy to `never`. Existing host restrictions still apply.
 
-**Offline messages are not a job queue.** Messages sent while Riftjack is stopped are ignored at startup. Interrupted tasks are not automatically replayed. Sessions, accounts, and files persist across normal restarts.
+**Local tasks are not replayed after interruption.** Codex and Claude ignore messages missed while Riftjack is stopped. Already accepted messages in a linked-room queue survive restart, but interrupted active tasks are not replayed. Sessions, accounts, and files persist. External workers have separate [durable inbox and lease rules](docs/grok.md#wait-work-reply).
 
 [Access and encryption](docs/security.md) explains these boundaries. [Restarts and recovery](docs/operations.md) explains the supervisor and rollback behavior.
 

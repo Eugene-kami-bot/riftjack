@@ -12,11 +12,11 @@ npm test
 python3 -m unittest discover -s test -p '*_test.py'
 ```
 
-`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; run them in the normal sandbox without requesting network or port access.
+`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; start them in the normal sandbox without requesting network or port access. The launcher tests also inspect and signal their own temporary processes using `ps` and `lsof`; a sandbox that denies those operations requires a separately approved rerun of `node --test test/connector-launcher.test.mjs`.
 
 `npm run test:http` runs `test/http/*.test.ts`. These tests bind an ephemeral port on `127.0.0.1` and make loopback requests, including from the Python worker client. They use no live Matrix service or model account. A sandbox that blocks listening ports may require permission for this command.
 
-Run the HTTP suite when changing the publication, background-task, attachment or room-message MCP transport or its Codex/Claude integration, the worker HTTP server, API authentication/routing, long polling, request/response or attachment handling, `scripts/worker-client.py`, or queue/service behavior exposed through that API. Also run it when changing its fixtures, suite layout, or relevant dependencies. Changes confined to chat commands, formatting, documentation, or Codex/Claude adapters normally need only the relevant ordinary tests and type checking. Queue and worker-status unit tests remain in `npm test`. Publication logic tests use temporary local bare Git repositories and need no listening port or live GitHub access. MCP integration tests in `test/http/` open loopback ports and use CLI doubles plus local bare repositories; they make no model requests or live GitHub calls.
+Run the HTTP suite when changing the publication, background-task, attachment, room-message or fetch MCP transport or its Codex/Claude integration, the worker HTTP server, API authentication/routing, long polling, request/response or attachment handling, `scripts/worker-client.py`, or queue/service behavior exposed through that API. Also run it when changing its fixtures, suite layout, or relevant dependencies. Changes confined to chat commands, formatting, documentation, or Codex/Claude adapters normally need only the relevant ordinary tests and type checking. Queue and worker-status unit tests remain in `npm test`. Publication logic tests use temporary local bare Git repositories and need no listening port or live GitHub access. MCP integration tests in `test/http/` open loopback ports and use CLI doubles plus local bare repositories; they make no model requests or live GitHub calls.
 
 Use `npm run test:all` when a full validation is intended; it runs both suites and requires permission to open a loopback port in restricted environments. Put future port-opening tests under `test/http/`; keep tests that need no listener in `test/`. Type checking includes both directories. Run `npm audit` separately when checking dependencies; it contacts the package registry.
 
@@ -41,6 +41,8 @@ Review the staged files and scan for credentials. Runtime data and real deployme
 ## Documentation
 
 Keep the README focused on the first successful conversation. Put command details in chat.md or manager.md, installation details in setup.md, and lifecycle behavior in operations.md. Describe current behavior and known limitations; release-specific migration notes should identify the affected version.
+
+When changing user-visible behavior, check all descriptions of that behavior in the README, relevant guides, built-in help and agent-facing tool instructions in the same change. Verify defaults, limits and exceptions against the implementation; do not copy an older guide as the source of truth.
 
 Built-in messages, help and documentation use English; agent conversations can use any supported language. Use neutral examples such as `projects/demo` and `@alice:example.com`, without personal conversation details or real deployment paths. Unicode names, paths and messages remain valid test inputs. Tests should check behavior and data rather than incidental wording or whitespace, except when the displayed text or layout is the behavior being tested.
 

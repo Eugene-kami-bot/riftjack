@@ -34,7 +34,7 @@ export const MANAGER_HELP = [
   'Select the bot by name, short ID or full ID. Quote names containing “ for ”. Separate full user Matrix IDs with spaces or commas.',
   'After `allow bot`, the bot invites each user to a separate encrypted DM. Accept in Element X. Repeating the command reuses an existing room or pending invitation.',
   'If the bot is disconnected or an invitation fails, access is retained and the manager reports the result. Retry `allow bot` or open a DM manually. If room creation has an unknown outcome, check existing rooms first; automatic retry is blocked.',
-  'Per-bot access grants access **only to the selected Codex or Claude bot**, without the manager or bot creation. Shared `allow` is not needed. To narrow existing shared access, first use `remove @user:server`, then grant per-bot access.',
+  'Per-bot access grants access **only to the selected Codex, Claude or Grok bot**, without the manager or bot creation. Shared `allow` is not needed. To narrow existing shared access, first use `remove @user:server`, then grant per-bot access.',
   'Access changes apply immediately and survive restarts and renaming. Revoking per-bot access stops the user’s task only on that bot. The owner always has access.',
   '### Controls and restart',
   '- `!help` — show help.\n- `!cancel` — cancel the current operation; completed changes remain.\n- `!restart` — restart all bots.\n- `!restart supervisor` — also restart the supervisor process.',

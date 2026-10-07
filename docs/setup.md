@@ -6,10 +6,10 @@ Set up a host, connect its agents to Matrix, and keep runtime state separate fro
 
 ## Instance layout
 
-This repository holds only code. A running installation keeps its state in a separate *instance directory*: `.env`, `data/` (credentials, crypto stores, logs), `.connector-history/` (working-version snapshots) and `.matrix-media/`. The usual layout keeps the repository inside the instance directory:
+This repository holds only code. A running installation keeps its state in a separate *instance directory*: `.env`, `data/` (credentials, crypto stores, logs) and `.connector-history/` (working-version snapshots). Attachments are stored in `.matrix-media/` under each bot’s workspace, which can be outside the instance directory. The usual layout keeps the repository inside the instance directory:
 
 ```text
-riftjack-instance/         instance: .env, data/, .connector-history/, .matrix-media/
+riftjack-instance/         instance: .env, data/, .connector-history/
 └── riftjack/              this git repository (node_modules/ is installed here)
 ```
 
@@ -42,7 +42,7 @@ Requires Node.js 24+, Python 3, `lsof`, your Synapse server, and at least one en
 
 All Codex bots use the same local ChatGPT login and share its plan usage limits. More bot accounts do not create additional quota. The connector forces `forced_login_method="chatgpt"` and the built-in OpenAI provider, does not pass API keys to Codex, and has no API-key fallback. The manager uses local command handling and makes no model requests. Claude bots use only the Claude login; neither engine starts the other CLI. If the plan limit is reached, wait for it to reset; the connector does not switch to separately billed API access. Any additional credits already enabled on your ChatGPT account remain governed by that account's billing settings.
 
-Keep this process running on the machine containing your repository. Bots are unavailable while it is stopped. Local Codex/Claude integrations need no HTTP listener or inbound tunnel. External workers use the optional loopback listener described in [Grok setup](grok.md).
+Keep this process running on the machine containing your repository. Bots are unavailable while it is stopped. Local Codex/Claude integrations need no publicly reachable port or inbound tunnel. Connector MCP tools open authenticated HTTP listeners on `127.0.0.1` for the duration of a task; the CLI protocol itself uses stdio. External workers use the optional loopback listener described in [Grok setup](grok.md).
 
 ## Optional SSH tunnel
 
@@ -72,6 +72,39 @@ Normal shutdown and `!restart` stop and reap the managed SSH process before the 
 ## Provisioning failures
 
 Bot creation failures are reported in the manager DM and connector log with the failed step, API origin, HTTP status or known network/Matrix error code, and troubleshooting advice. A refused connection to a loopback Admin API includes an SSH tunnel hint. If account creation was attempted before the failure, check Synapse accounts before retrying: the account may exist even though the connector did not save its credentials. Unexpected task errors also include safe codes from nested causes. Raw exception messages, response bodies, request headers, passwords and tokens are not dumped into diagnostics. Codex RPC rejections identify the operation and numeric code, for example `Codex App Server rejected thread/resume (RPC -32602).` Report that complete message when troubleshooting; it distinguishes startup, resume and turn failures without exposing server diagnostics. Unknown operation names are shown only as `request`.
+
+## Optional fetch tool
+
+To let writable Codex and Claude bots read selected HTTPS resources without a
+confirmation for each request, set `FETCH_ALLOW` in the instance `.env`:
+
+```dotenv
+FETCH_ALLOW=https://api.github.com/repos/OWNER/REPO/ https://logs.example.org/project/
+# Optional bearer token, scoped to an allowed prefix:
+# FETCH_AUTH=https://api.github.com/repos/OWNER/REPO/|/absolute/path/to/token-file
+# FETCH_MAX_BYTES=20971520
+# FETCH_PYTHON=/usr/bin/python3
+```
+
+Replace the example prefixes, then restart. Prefixes must end in `/` and have
+no credentials, query or fragment. `FETCH_ALLOW` accepts spaces or commas;
+`https://*.example.org/` matches subdomains, not the bare domain. Each
+space-separated `FETCH_AUTH` entry pairs a non-wildcard allowed prefix with a
+token file. If prefixes overlap, the first matching auth entry is used.
+Authorization is selected again for every redirect, which must also match the
+allowlist. Non-public destination addresses are refused.
+
+Python 3 must support `dir_fd` for `os.open`, `os.mkdir` and `os.unlink`. The
+connector searches `PATH`, or uses `FETCH_PYTHON`; the executable is checked
+against the default workspace and must be outside it. Tokens stay out of tool
+responses, but an agent able to read the token file can still obtain them.
+Choose limited tokens and protect their files with host access controls.
+
+The default response limit is 20 MiB; `FETCH_MAX_BYTES` accepts 64 KiB through
+256 MiB. Requests have a 120-second deadline and at most five redirects. An
+empty `FETCH_ALLOW` disables the tool. It is also unavailable to read-only bots.
+See [reading web resources](chat.md#reading-web-resources) for saved files and
+truncated responses.
 
 ## Codex model settings
 

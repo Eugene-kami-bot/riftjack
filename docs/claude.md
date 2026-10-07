@@ -4,7 +4,7 @@ Claude bots use the host’s Claude account and their own conversation sessions.
 
 [Back to Riftjack](../README.md)
 
-Install [Claude Code](https://code.claude.com/docs/en/setup) on the connector host and sign in with your Claude account using `claude auth login`. Claude uses its own account limits, separately from ChatGPT. The connector does not forward Anthropic API keys, OAuth-token environment variables, cloud-provider credentials, or Matrix credentials to Claude. Before each task it requires `claude auth status --json` to report a logged-in `claude.ai` account.
+Install [Claude Code](https://code.claude.com/docs/en/setup) on the connector host and sign in with your Claude account using `claude auth login`. Claude uses its own account limits, separately from ChatGPT. The connector does not forward Anthropic API keys, OAuth-token environment variables, cloud-provider credentials, or Matrix credentials to Claude. At first use, the backend checks CLI compatibility and requires `claude auth status --json` to report a logged-in `claude.ai` account. A successful check is cached for that backend instance; a failed task clears it so the next attempt checks again. Provisioning and `check:claude` also perform the check.
 
 Set `CLAUDE_PATH` in `.env` to the executable's absolute path if `claude` is not on the connector's PATH. `CLAUDE_MODEL` is the shared default; leave it blank for the CLI default. Override it for one bot with `set model bot Research to MODEL` in the manager DM (see [model settings](manager.md#model-settings)). No new npm dependency is required. Verify the installation and login without a model request:
 

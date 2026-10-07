@@ -28,7 +28,7 @@ export async function manageBotAccess(request: BotAccessRequest, options: {
   const { accounts, access, sender } = options;
   if (sender !== access.owner) throw new PublicError('Only the initial owner can manage access lists through the manager.');
   const bot = resolveProfileTarget(accounts, request.target, sender, access.owner);
-  if (bot.kind === 'manager') throw new PublicError('Manager access requires shared access through allow @user:server. Per-bot lists are supported for Codex and Claude bots.');
+  if (bot.kind === 'manager') throw new PublicError('Manager access requires shared access through allow @user:server. Per-bot lists are supported for Codex, Claude and Grok bots.');
   const invitations: string[] = [];
   options.signal?.throwIfAborted();
   if (request.action !== 'list') {

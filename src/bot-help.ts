@@ -12,7 +12,7 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '### Updates during work',
     kind === 'codex'
       ? 'Send another message **in the same chat or thread** to update the active task (steering).'
-      : 'Send another message **in the same chat or thread** to queue it after the current step.',
+      : 'Send another message **in the same chat or thread** to update the running task when Claude supports message replay; otherwise it is queued as a follow-up. An in-flight tool call is not interrupted.',
     '> Also check empty input.',
     'By default, each thread has separate history and another conversation must wait until the bot is idle. With configured session links, rooms share one existing history: other-room messages queue for separate turns and never steer this task. Linked agents do not support `!reset`.',
     '### Attachments',
