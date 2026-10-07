@@ -95,16 +95,19 @@ The connector owner or a bot’s creator can give each Codex or Claude bot its o
 set model bot Builder to MODEL
 set reasoning bot Builder to high
 set tier bot Builder to default
+set tier bot Research to fast
 show settings bot Builder
 reset model bot Builder
 reset reasoning bot Builder
 reset tier bot Builder
 ```
 
-Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model selection works for both Codex and Claude. Reasoning and tier overrides are Codex-only; `default` requests standard service and `priority` requests priority processing. Grok’s model belongs to its external worker.
+Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model selection works for both Codex and Claude. Reasoning overrides are Codex-only. For Codex tiers, `default` requests standard service and `priority` requests priority processing. For Claude tiers, `fast` requests fast mode and `default` explicitly turns it off. `reset tier bot Research` restores inheritance from `CLAUDE_SERVICE_TIER`, or from CLI settings when that shared value is blank. Grok’s model belongs to its external worker.
 
 Each field inherits its corresponding `.env` default until explicitly set for the bot. Resetting a field removes just that override. If the shared value is blank, Riftjack leaves that option to the CLI. `show settings bot` labels overrides and inherited values; `!status` in the bot chat shows the effective configuration separately from the last CLI session report.
 
 Changes are saved in the bot’s `engineSettings` record in `accounts.json` and apply to the next task, including resumed conversations and background notifications. Running tasks and their steering retain the settings captured when they started. No connector restart or conversation reset is needed for manager commands. Editing `.env` or `accounts.json` directly requires a restart. These settings apply to every conversation with that bot; they do not create separate provider credentials or quota.
 
-Riftjack validates setting names and identifier syntax. Availability of a particular model, reasoning level or service tier is checked by the CLI when a task starts; saving settings does not make a model request.
+Claude fast mode uses `fastMode` in the CLI launch settings and requires a compatible Claude Code version, model and account. It has premium pricing; see [Claude fast mode](https://code.claude.com/docs/en/fast-mode). Saving `fast` records the request; check the last reported fast-mode state with `!status` after a task starts. Riftjack does not change the model setting when tier changes.
+
+Riftjack validates setting names and identifier syntax, and accepts only `default` or `fast` for Claude tiers. Availability of a particular model, reasoning level or service tier is checked by the CLI when a task starts; saving settings does not make a model request.

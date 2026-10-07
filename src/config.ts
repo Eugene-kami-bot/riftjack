@@ -32,6 +32,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (codexApprovalPolicy !== 'on-request' && codexApprovalPolicy !== 'never') throw new Error('CODEX_APPROVAL_POLICY must be on-request or never.');
   const claudeApprovalPolicy = env.CLAUDE_APPROVAL_POLICY?.trim() || 'on-request';
   if (claudeApprovalPolicy !== 'on-request' && claudeApprovalPolicy !== 'never') throw new Error('CLAUDE_APPROVAL_POLICY must be on-request or never.');
+  const claudeServiceTier = env.CLAUDE_SERVICE_TIER?.trim() || undefined;
+  if (claudeServiceTier && !['default', 'fast'].includes(claudeServiceTier)) throw new Error('CLAUDE_SERVICE_TIER must be default, fast or blank.');
   const timeoutMs = Number(env.TASK_TIMEOUT_SECONDS || '86400') * 1000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 86_400_000) {
     throw new Error('TASK_TIMEOUT_SECONDS must be between 1 and 86400.');
@@ -60,6 +62,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     codexPath: env.CODEX_PATH?.trim() || 'codex',
     codexNetworkAllow,
     claudeModel: env.CLAUDE_MODEL?.trim() || undefined,
+    claudeServiceTier,
     claudePath: env.CLAUDE_PATH?.trim() || 'claude',
     claudeApprovalPolicy: claudeApprovalPolicy as 'on-request' | 'never',
     workspace,

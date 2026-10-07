@@ -64,7 +64,7 @@ test('settings persist per bot, inherit defaults, reset one field and appear in 
 test('authorization, unsupported engines and invalid values leave settings untouched', t => {
   const f = setup(t), before = readFileSync(f.file, 'utf8');
   assert.throws(() => f.run('set model bot codex to example', '@other:test'), /Only/);
-  for (const text of ['set model bot grok to example', 'set model bot manager to example', 'set tier bot claude to default',
+  for (const text of ['set model bot grok to example', 'set model bot manager to example', 'set tier bot claude to priority',
     'reset reasoning bot claude', 'set model bot codex to --flag', 'set model bot codex to ' + 'x'.repeat(129)]) assert.throws(() => f.run(text));
   assert.equal(readFileSync(f.file, 'utf8'), before);
   f.accounts.add({ ...f.accounts.list()[0], userId: '@duplicate:test' });
@@ -82,4 +82,46 @@ test('malformed stored settings fail validation on startup', t => {
   original[1].engineSettings = { reasoning: 'high' };
   writeFileSync(f.file, JSON.stringify(original));
   assert.throws(() => new Accounts(f.file));
+});
+
+
+test('Claude tier persists, explicitly disables fast mode and resets without changing other bots or model settings', t => {
+  const f = setup(t);
+  const codexBefore = f.accounts.list()[0];
+  f.run('set model bot claude to personal-claude');
+  assert.match(f.run('set tier bot claude to fast', '@creator:test'), /tier:.*fast.*bot override/);
+  let account = new Accounts(f.file).list()[1];
+  assert.equal(account.engineSettings!.tier, 'fast');
+  let effective = withEngineSettings(f.config, account);
+  assert.equal(effective.claudeServiceTier, 'fast');
+  assert.match(botStatus('claude', effective, {}), /Service tier: fast/);
+  assert.match(f.run('set tier bot claude to default'), /tier:.*default.*bot override/);
+  account = new Accounts(f.file).list()[1];
+  effective = withEngineSettings({ ...f.config, claudeServiceTier: 'fast' }, account);
+  assert.equal(effective.claudeServiceTier, 'default');
+  assert.match(f.run('reset tier bot claude'), /tier: automatic.*inherited/);
+  account = new Accounts(f.file).list()[1];
+  assert.equal(account.engineSettings!.tier, undefined);
+  assert.equal(account.engineSettings!.model, 'personal-claude');
+  assert.equal(withEngineSettings(f.config, account).claudeServiceTier, undefined);
+  assert.equal(withEngineSettings({ ...f.config, claudeServiceTier: 'fast' }, account).claudeServiceTier, 'fast');
+  assert.deepEqual(f.accounts.list()[0], codexBefore);
+  const before = readFileSync(f.file, 'utf8');
+  assert.throws(() => f.run('set tier bot claude to fast', '@other:test'), /Only/);
+  assert.throws(() => f.run('set tier bot claude to priority'), /default or fast/);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+});
+
+test('Claude shared tier validates values and remains unset by default', t => {
+  const f = setup(t);
+  const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.config.workspace };
+  assert.equal(loadConfig(env).claudeServiceTier, undefined);
+  assert.equal(loadConfig({ ...env, CLAUDE_SERVICE_TIER: ' fast ' }).claudeServiceTier, 'fast');
+  assert.equal(loadConfig({ ...env, CLAUDE_SERVICE_TIER: 'default' }).claudeServiceTier, 'default');
+  assert.equal(loadConfig({ ...env, CLAUDE_SERVICE_TIER: ' ' }).claudeServiceTier, undefined);
+  assert.throws(() => loadConfig({ ...env, CLAUDE_SERVICE_TIER: 'priority' }), /CLAUDE_SERVICE_TIER/);
+  const original = JSON.parse(readFileSync(f.file, 'utf8'));
+  original[1].engineSettings = { tier: 'priority' };
+  writeFileSync(f.file, JSON.stringify(original));
+  assert.throws(() => new Accounts(f.file), /default or fast/);
 });

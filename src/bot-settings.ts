@@ -26,7 +26,7 @@ export function manageBotSettings(request: SettingsRequest, options: {
   const settings = { ...bot.engineSettings };
   validateEngineSettings(settings, bot.kind);
   if (request.action !== 'show') {
-    if (bot.kind === 'claude' && request.field !== 'model') throw new PublicError('Reasoning and tier settings are supported only for Codex bots.');
+    if (bot.kind === 'claude' && request.field === 'reasoning') throw new PublicError('Reasoning settings are supported only for Codex bots.');
     if (request.action === 'reset') delete settings[request.field];
     else settings[request.field] = request.value!;
     validateEngineSettings(settings, bot.kind);
@@ -35,7 +35,7 @@ export function manageBotSettings(request: SettingsRequest, options: {
   const config = withEngineSettings(options.config, { ...bot, engineSettings: settings });
   const fields: [keyof EngineSettings, string | undefined][] = bot.kind === 'codex'
     ? [['model', config.codexModel], ['reasoning', config.codexReasoningEffort], ['tier', config.codexServiceTier]]
-    : [['model', config.claudeModel]];
+    : [['model', config.claudeModel], ['tier', config.claudeServiceTier]];
   return `### Settings for ${markdownText(bot.name)}\n\n` + fields.map(([key, value]) =>
     `- ${key}: ${value ? inlineCode(value) : 'automatic (CLI settings)'} — ${settings[key] ? 'bot override' : 'inherited'}`).join('\n') +
     '\n\nChanges apply to the next task; running tasks keep their settings. No restart or conversation reset is required. Model and option availability is checked by the CLI when a task starts.';

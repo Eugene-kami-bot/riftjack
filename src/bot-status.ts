@@ -33,7 +33,8 @@ export function botStatus(kind: 'codex' | 'claude', config: Config, session: Ses
   const settings = [
     row('Workspace', config.workspace),
     row('Model', codex ? config.codexModel : config.claudeModel, configured),
-    ...(codex ? [row('Reasoning', config.codexReasoningEffort, configured), row('Service tier', config.codexServiceTier, configured)] : []),
+    ...(codex ? [row('Reasoning', config.codexReasoningEffort, configured)] : []),
+    row('Service tier', codex ? config.codexServiceTier : config.claudeServiceTier, configured),
   ].join('\n');
   const reported = report ? [
     row('Reported at', report.reportedAt),

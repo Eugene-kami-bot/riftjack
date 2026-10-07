@@ -159,6 +159,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
+    ...(config.claudeServiceTier !== undefined && { fastMode: config.claudeServiceTier === 'fast' }),
     hooks: claudeCheckpointHooks(config.workspace),
     // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
     // sandbox it takes precedence over saved allow rules, including exclusions.

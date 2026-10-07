@@ -635,18 +635,25 @@ test('Claude sends progress around tool use without duplicating final text or ex
   assert.equal(typeof result === 'string' ? result : result.text, 'Claude answer');
 });
 
-test('Claude snapshots dynamic model settings and refreshes them on resume', async t => {
-  const f = setup(t), settings = { ...f.config, claudeModel: 'first-model' };
+test('Claude snapshots dynamic model and tier settings and refreshes them on resume', async t => {
+  const f = setup(t), settings = { ...f.config, claudeModel: 'first-model', claudeServiceTier: 'fast' as string | undefined };
   const backend = createBackend(() => settings, f.state);
   const first = backend('claude', 'hello', 'dynamic', signal(), '@owner:test');
-  settings.claudeModel = 'second-model';
+  settings.claudeModel = 'second-model'; settings.claudeServiceTier = 'default';
   await first;
   const invocation = () => f.calls().filter(c => c.args?.includes('--model')).at(-1).args as string[];
   assert.equal(invocation()[invocation().indexOf('--model') + 1], 'first-model');
+  assert.equal(JSON.parse(invocation()[invocation().indexOf('--settings') + 1]).fastMode, true);
   await backend('claude', 'hello again', 'dynamic', signal(), '@owner:test');
   const args = invocation();
   assert.equal(args[args.indexOf('--model') + 1], 'second-model');
   assert.equal(args[args.indexOf('--resume') + 1], 'claude-session-1');
+  assert.equal(JSON.parse(args[args.indexOf('--settings') + 1]).fastMode, false);
+  settings.claudeServiceTier = undefined;
+  await backend('claude', 'inherited tier', 'dynamic', signal(), '@owner:test');
+  const reset = invocation();
+  assert.equal(Object.hasOwn(JSON.parse(reset[reset.indexOf('--settings') + 1]), 'fastMode'), false);
+  assert.equal(reset[reset.indexOf('--resume') + 1], 'claude-session-1');
 });
 
 for (const prompt of ['[auth-error]', '[synthetic-error]', '[synthetic-only]', '[synthetic-fallback]']) {
@@ -718,4 +725,20 @@ for (const [suffix, reason] of [['', 'not-logged-in'], [' [auth-http]', 'http-un
 test('Claude model text quoting an auth diagnostic remains ordinary output', async t => {
   const f = setup(t);
   assert.equal(await f.backend('claude', '[quote-auth]', 'quote-auth', signal(), '@owner:test'), 'Not logged in · Please run /login');
+});
+
+
+test('Claude tier overrides preserve sandbox, permission and checkpoint settings', t => {
+  const f = setup(t);
+  for (const tier of [undefined, 'fast', 'default']) {
+    for (const sandbox of ['workspace-write', 'read-only'] as const) {
+      const args = claudeArguments({ ...f.config, sandbox, claudeServiceTier: tier });
+      const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+      assert.equal(settings.fastMode, tier === undefined ? undefined : tier === 'fast');
+      assert.equal(Object.hasOwn(settings, 'fastMode'), tier !== undefined);
+      assert.equal(settings.sandbox.enabled, true);
+      assert.deepEqual(settings.permissions.ask, ['Bash']);
+      assert.ok(settings.hooks.SessionStart);
+    }
+  }
 });

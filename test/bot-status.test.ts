@@ -22,7 +22,7 @@ test('status separates configured and reported settings and labels missing metad
   const claude = botStatus('claude', config, { claudeReport: engineReport({ model: 'claude-model' }) });
   assert.match(claude, /Reasoning: unknown/);
   assert.match(claude, /Fast mode: unknown/);
-  assert.doesNotMatch(claude, /Service tier/);
+  assert.match(claude, /Service tier: automatic/);
   assert.match(botStatus('codex', config, {}), /No report yet/);
   assert.match(botStatus('claude', { ...config, claudeModel: undefined }, {}), /automatic/);
   assert.doesNotMatch(botStatus('claude', config, { codexReport: report }), /resolved/);

@@ -14,7 +14,7 @@ export const MANAGER_HELP = [
   '### List bots',
   '- `list bots` — names, types, Matrix IDs and workspaces. Use a Matrix ID to open a DM.',
   '### Model settings · owner or bot creator',
-  '- `set model bot Builder to MODEL` — select a model for a Codex or Claude bot.\n- `set reasoning bot Builder to high` — Codex reasoning effort.\n- `set tier bot Builder to default` — Codex service tier.\n- `show settings bot Builder` — effective values and which are inherited.\n- `reset model bot Builder` — inherit the shared model again; also supports `reset reasoning bot` and `reset tier bot`.',
+  '- `set model bot Builder to MODEL` — select a model for a Codex or Claude bot.\n- `set reasoning bot Builder to high` — Codex reasoning effort.\n- `set tier bot Builder to default` — service tier: Codex `default`/`priority`, Claude `default`/`fast`.\n- `show settings bot Builder` — effective values and which are inherited.\n- `reset model bot Builder` — inherit the shared model again; also supports `reset reasoning bot` and `reset tier bot`.',
   'Use a bot name or Matrix ID; quote names containing “ to ”. Settings persist and apply to the next task without restarting or resetting the conversation. Running tasks keep their settings. Model and option availability depends on the CLI and account. Grok settings belong to its external worker.',
   '### Name and avatar',
   '- `rename bot Codex to Riftjack Codex` — change the display name.\n- `set avatar Riftjack Codex` — use as the caption of a PNG, JPEG, GIF or WebP image.\n- `remove avatar Riftjack Codex` — remove the avatar.',
