@@ -4,6 +4,7 @@ import type { Config } from './config.js';
 import { deniedRequest } from './codex-interactions.js';
 import { PublicError, OwnerDiagnosticError } from './errors.js';
 import { codexAccountFailure } from './auth-diagnostics.js';
+import { codexNetworkArgs, verifyCodexNetwork } from './codex-network.js';
 
 export type AgentMessage = { type: string; id: string; text?: string; phase?: string | null };
 export type Turn = { id: string; status: string; items?: AgentMessage[]; error?: { codexErrorInfo?: unknown; message?: unknown; additionalDetails?: unknown } | null };
@@ -41,7 +42,7 @@ export class AppServer {
   private closed: Promise<void>;
   private incoming = new Map<string | number, { request: ServerRequest; controller: AbortController }>();
 
-  constructor(config: Config, onNotification: (message: Notification) => void, onFailure: (error: Error) => void, onRequest?: RequestHandler) {
+  constructor(private config: Config, onNotification: (message: Notification) => void, onFailure: (error: Error) => void, onRequest?: RequestHandler) {
     const env: Record<string, string> = {};
     for (const name of ['PATH', 'HOME', 'CODEX_HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'SYSTEMROOT']) {
       if (process.env[name]) env[name] = process.env[name]!;
@@ -49,7 +50,7 @@ export class AppServer {
     const args = ['app-server', '--listen', 'stdio://',
       '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"',
       '-c', `approval_policy="${onRequest ? config.codexApprovalPolicy : 'never'}"`, '-c', `sandbox_mode="${config.sandbox}"`,
-      '-c', 'sandbox_workspace_write.network_access=false', '-c', 'web_search="disabled"'];
+      ...codexNetworkArgs(config.codexNetworkAllow), '-c', 'web_search="disabled"'];
     this.child = spawn(config.codexPath, args, { cwd: config.workspace, env, stdio: 'pipe' });
     const fail = (error: Error) => {
       if (this.failure) return;
@@ -132,6 +133,10 @@ export class AppServer {
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.write({ method: 'initialized', params: {} });
+    if (this.config.codexNetworkAllow.length) {
+      const result = await this.request<{ config: unknown }>('config/read', { cwd: this.config.workspace, includeLayers: false });
+      verifyCodexNetwork(result.config, this.config.codexNetworkAllow);
+    }
   }
 
   async close(): Promise<void> {

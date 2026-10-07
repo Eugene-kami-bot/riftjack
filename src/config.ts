@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { loadTunnelConfig } from './ssh-tunnel.js';
 import { loadFetchConfig } from './fetch.js';
 import { optionalAudioConfig } from './audio-transcription.js';
+import { codexNetworkDomains } from './codex-network.js';
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const required = (name: string) => {
@@ -25,6 +26,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!statSync(workspace).isDirectory()) throw new Error('RIFTJACK_WORKSPACE must be a directory.');
   const sandbox = env.CODEX_SANDBOX?.trim() || 'workspace-write';
   if (sandbox !== 'workspace-write' && sandbox !== 'read-only') throw new Error('CODEX_SANDBOX must be workspace-write or read-only.');
+  const codexNetworkAllow = codexNetworkDomains(env.CODEX_NETWORK_ALLOW);
+  if (codexNetworkAllow.length && sandbox !== 'workspace-write') throw new Error('CODEX_NETWORK_ALLOW currently requires CODEX_SANDBOX=workspace-write.');
   const codexApprovalPolicy = env.CODEX_APPROVAL_POLICY?.trim() || 'on-request';
   if (codexApprovalPolicy !== 'on-request' && codexApprovalPolicy !== 'never') throw new Error('CODEX_APPROVAL_POLICY must be on-request or never.');
   const claudeApprovalPolicy = env.CLAUDE_APPROVAL_POLICY?.trim() || 'on-request';
@@ -55,6 +58,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     codexReasoningEffort: env.CODEX_REASONING_EFFORT?.trim() || undefined,
     codexServiceTier: env.CODEX_SERVICE_TIER?.trim() || undefined,
     codexPath: env.CODEX_PATH?.trim() || 'codex',
+    codexNetworkAllow,
     claudeModel: env.CLAUDE_MODEL?.trim() || undefined,
     claudePath: env.CLAUDE_PATH?.trim() || 'claude',
     claudeApprovalPolicy: claudeApprovalPolicy as 'on-request' | 'never',

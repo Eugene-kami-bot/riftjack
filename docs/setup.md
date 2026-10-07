@@ -44,6 +44,30 @@ All Codex bots use the same local ChatGPT login and share its plan usage limits.
 
 Keep this process running on the machine containing your repository. Bots are unavailable while it is stopped. Local Codex/Claude integrations need no publicly reachable port or inbound tunnel. Connector MCP tools open authenticated HTTP listeners on `127.0.0.1` for the duration of a task; the CLI protocol itself uses stdio. External workers use the optional loopback listener described in [Grok setup](grok.md).
 
+## Optional Codex command network access
+
+Command network access is disabled by default. With `CODEX_SANDBOX=workspace-write`,
+set `CODEX_NETWORK_ALLOW=github.com` to allow sandboxed HTTPS Git requests to GitHub.
+Use space-separated exact DNS hostnames (at most 32); URLs, IP addresses and
+wildcards are rejected. Subdomains and redirect destinations need their own entries.
+Restart Riftjack after changing the instance configuration.
+
+This uses Codex's experimental `network_proxy` feature, tested with CLI 0.160.0
+on macOS. Other platforms have not been validated. Riftjack checks the effective
+workspace policy before starting each task, including resumed conversations. An
+unsupported CLI or conflicting inherited network settings stops the task before
+it starts. In particular, Codex merges domain tables: remove broader rules from
+Codex configuration rather than expecting this list to replace them. Named Codex
+permission profiles are not supported with this setting.
+
+The allowance applies to all sandboxed commands of Codex bots in this instance,
+not just `git fetch`, and grants access to the domain rather than a repository or
+HTTP method. Authentication for private repositories remains a separate host
+configuration concern. Filesystem sandboxing and approval handling stay in place.
+Claude, connector fetch tools and model/API traffic use their existing settings.
+See the [Codex configuration reference](https://developers.openai.com/codex/config-reference/)
+for the proxy policy.
+
 ## Optional SSH tunnel
 
 If the public reverse proxy does not expose Synapse Admin API, the connector can maintain an SSH tunnel to the server's local port 8008. Set these in `.env`, replacing the SSH target with your server login:

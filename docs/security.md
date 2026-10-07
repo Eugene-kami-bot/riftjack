@@ -47,7 +47,7 @@ keep sensitive conversations in dedicated private rooms.
 
 Ordinary conversation histories are scoped by bot, account, room, and thread. Session links intentionally reuse one agent history across its private and shared rooms; routing rules do not provide strict separation of what that model knows. Bots still share the host OS account and the corresponding provider login. Bots assigned the same workspace can read and change the same files. Separate chats and per-bot access lists are not filesystem isolation. Use a separate OS account or container when you need that boundary.
 
-Codex uses a workspace-write or read-only sandbox; command network access is disabled by default. The default on-request policy forwards exceptions to Matrix. Claude has its own permission model, described in [Claude Code](claude.md#permissions). Connector credentials are filtered from both backends’ subprocess environments.
+Codex uses a workspace-write or read-only sandbox; command network access is disabled by default. Optional `CODEX_NETWORK_ALLOW` allows exact domains through the Codex network proxy for workspace-write commands; it is a domain allowance for all such commands, not a Git-only or read-only permission. See [configuration and limits](setup.md#optional-codex-command-network-access). The default on-request policy forwards exceptions to Matrix. Claude has its own permission model, described in [Claude Code](claude.md#permissions). Connector credentials are filtered from both backends’ subprocess environments.
 
 [Confirmation handling](chat.md#confirmations-and-answers) describes sender checks, request expiry, and reaction metadata. [Attachments](chat.md#images-files-and-audio) describes encrypted file transfer and workspace storage.
 

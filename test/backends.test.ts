@@ -43,6 +43,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const { id, method, params: p } = message;
   if (method === 'initialize') return respond(id, {});
   if (method === 'initialized') return;
+  if (method === 'config/read') {
+    const overrides = process.argv.slice(2).filter(arg => arg.startsWith('features.network_proxy='));
+    const proxy = JSON.parse(overrides[0].split('=').slice(1).join('=').replace(/=/g, ':'));
+    if (fs.existsSync(path.join(__dirname, 'wide-network'))) proxy.domains['*'] = 'allow';
+    return respond(id, {config: {sandbox_mode:'workspace-write', sandbox_workspace_write:{network_access:true}, features:{network_proxy:proxy}}});
+  }
   if (method === 'account/read') return respond(id, { account: { type: ${JSON.stringify(accountType)} } });
   if (method === 'account/rateLimits/read') return respond(id, { rateLimits: { primary: { usedPercent: 18, windowDurationMins: 10080, resetsAt: Date.now() / 1000 + 86400 } } });
   if (method === 'plugin/read') return respond(id, { plugin: {
@@ -869,4 +875,25 @@ for (const unfinished of [false, true]) test(`Codex compaction notifications, un
     { compaction: async phase => { phases.push(phase); } });
   if (unfinished) await assert.rejects(task, /task failed/); else await task;
   assert.deepEqual(phases, ['started', unfinished ? 'unconfirmed' : 'completed']);
+});
+
+
+test('Codex applies network domains on startup and resume after checking effective config', async t => {
+  const f = setup(t);
+  const backend = createBackend({ ...f.config, codexNetworkAllow: ['github.com'] }, f.state);
+  for (const prompt of ['hello', 'continue']) await backend('codex', prompt, 'network', signal(), '@owner:test');
+  const calls = f.calls();
+  assert.equal(calls.filter(c => c.method === 'config/read').length, 2);
+  for (const thread of calls.filter(c => ['thread/start', 'thread/resume'].includes(c.method))) {
+    assert.equal(thread.params.config['sandbox_workspace_write.network_access'], true);
+    assert.deepEqual(thread.params.config['features.network_proxy'].domains, { 'github.com': 'allow' });
+  }
+});
+
+test('Codex refuses a broader inherited network policy before starting a thread', async t => {
+  const f = setup(t);
+  writeFileSync(join(f.dir, 'wide-network'), '');
+  const backend = createBackend({ ...f.config, codexNetworkAllow: ['github.com'] }, f.state);
+  await assert.rejects(backend('codex', 'hello', 'network', signal(), '@owner:test'), /could not verify CODEX_NETWORK_ALLOW/);
+  assert.equal(f.calls().some(c => ['thread/start', 'turn/start'].includes(c.method)), false);
 });

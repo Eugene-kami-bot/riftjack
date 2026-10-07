@@ -15,6 +15,7 @@ import { PublicError } from './accounts.js';
 import { OwnerDiagnosticError } from './errors.js';
 import { mediaInstructions, outboxDirectory, parseMediaReply, type IncomingAttachment } from './media.js';
 import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } from './app-server.js';
+import { codexNetworkConfig } from './codex-network.js';
 import { codexInteraction } from './codex-interactions.js';
 import { approvalInstructions } from './approval-instructions.js';
 import { installPlugin } from './plugins.js';
@@ -159,7 +160,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         // New threads need their initial developer message. Resumed threads already
         // contain it; changed instructions are persisted explicitly below.
         ...(!saved && { developerInstructions: instructions }),
-        config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
+        config: { forced_login_method: 'chatgpt', model_provider: 'openai', ...codexNetworkConfig(config.codexNetworkAllow), web_search: 'disabled',
           [`mcp_servers.${PUBLISH_SERVER}`]: publication ? { url: publication.url, http_headers: publication.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['prepare_publish'],
             // Invoking this tool starts the review; requestPublish itself requires Matrix
