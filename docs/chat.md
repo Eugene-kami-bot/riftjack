@@ -280,7 +280,8 @@ or awaiting confirmation within that request. The standard Matrix indicator
 covers an active task, including tool calls, preparation and final delivery.
 Ordinary messages start without a separate text acknowledgement. Local
 commands such as `!status` do not start it. The connector renews the indicator
-every 15 seconds with a 30-second server expiry and clears it on completion,
+every 15 seconds with a 30-second server expiry, refreshes it after outgoing
+replies, confirmations and task attachments, and clears it on completion,
 cancellation or failure. After a crash it expires without a cleanup request.
 Access is checked before each update; indicator errors do not fail the task.
 

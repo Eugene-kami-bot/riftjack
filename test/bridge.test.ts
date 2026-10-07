@@ -33,7 +33,8 @@ test('typing covers backend work and final delivery, but not local commands or d
   const task = f.bridge.handle('!dm:test', event()); await ready.promise;
   assert.deepEqual(calls, [true]);
   finish.release(); await task;
-  assert.deepEqual(calls, [true, false]);
+  assert.equal(calls.at(-1), false);
+  assert.equal(calls.filter(typing => !typing).length, 1);
 });
 
 for (const end of ['failure', 'cancel', 'stop'] as const) test(`typing clears after task ${end}`, async t => {
@@ -911,4 +912,27 @@ test('compaction service hook uses the human identity, and delivery failure does
   assert.deepEqual(notices, ['started', 'completed'].map(phase => ({ phase, context: { room: '!dm:test', sender: '@owner:test' } })));
   assert.equal(f.errors.length, 1);
   assert.equal(f.replies.at(-1), 'answer');
+});
+
+
+for (const delivery of ['progress', 'attachment'] as const) test(`typing resumes immediately after ${delivery} delivery while the task is active`, async t => {
+  const ready = gate(), finish = gate();
+  let visible = false;
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    if (delivery === 'progress') await hooks!.progress!('Still working');
+    else await hooks!.sendAttachments!([{ root: '/outbox', path: '/outbox/file.txt' }], new AbortController().signal);
+    ready.release(); await finish.promise;
+    return 'done';
+  }, true, {
+    typing: async (_room, typing) => { visible = typing; },
+    reply: async () => { visible = false; }, // Clients can clear typing when a message arrives.
+    sendAttachments: async () => { visible = false; },
+  });
+  const task = f.bridge.handle('!dm:test', event());
+  try {
+    await ready.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(visible, true);
+  } finally { finish.release(); await task; }
+  assert.equal(visible, false);
 });

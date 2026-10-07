@@ -81,7 +81,7 @@ type Active = {
   room: string; event: MatrixEvent;
   key: string; backendKey: string; sender: string; controller: AbortController; running: boolean; failed: boolean;
   ready: Promise<void>; markReady: () => void; steering: Promise<void>; buffered: number; followups: Followup[];
-  interactions: Interactions; publication?: boolean;
+  interactions: Interactions; publication?: boolean; typing?: ReturnType<typeof taskTyping>;
 };
 
 export function sessionKey(room: string, event: MatrixEvent) {
@@ -95,6 +95,13 @@ export class Bridge {
   private draining = false;
   private admission = Promise.resolve();
   constructor(private options: Options) {}
+  private refreshTyping(room: string): void {
+    if (this.active?.room === room) this.active.typing?.refresh();
+  }
+  private async reply(...args: Parameters<Options['reply']>): Promise<void> {
+    await this.options.reply(...args);
+    this.refreshTyping(args[0]);
+  }
   get busy(): boolean { return !!this.active || this.draining || (!!this.options.linkedSession && this.options.state.queued(this.options.botId) > 0); }
   stop() { this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) { if (this.active?.sender === sender) this.active.controller.abort(); }
@@ -180,7 +187,7 @@ export class Bridge {
     // Room-state requests may finish out of order. Preserve incoming admission
     // order, then release before any model work so controls/steering can proceed.
     admitted();
-    const reply = (text: string) => o.reply(room, event, text);
+    const reply = (text: string) => this.reply(room, event, text);
     if (this.stopped || o.isStopping?.()) { await reply('The connector is restarting or stopping. Please retry in a few seconds.'); return; }
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
       const current = this.active;
@@ -228,14 +235,14 @@ export class Bridge {
         await reply(error.message); return;
       }
     }
-    if (verb === 'help') { await o.reply(room, event, help(o.kind), true); return; }
+    if (verb === 'help') { await this.reply(room, event, help(o.kind), true); return; }
     if (verb === 'status') {
       if (!o.status) { await reply('!status is not available for this bot.'); return; }
       const current = this.active;
       const task = !current ? 'Idle' : current.key !== key ? 'Busy in another conversation'
         : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
       const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
-      await o.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
+      await this.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
         + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : ''), true);
       return;
     }
@@ -243,7 +250,7 @@ export class Bridge {
     if (verb === 'usage') {
       if (!o.usage) { await reply('!usage is not available for this bot.'); return; }
       if (event.sender !== o.owner) { await reply('Only the initial owner can view the account usage.'); return; }
-      try { await o.reply(room, event, await o.usage(AbortSignal.timeout(30_000)), true); }
+      try { await this.reply(room, event, await o.usage(AbortSignal.timeout(30_000)), true); }
       catch (error) { o.report(error); await reply(errorMessage(error, 'Could not read account usage')); }
       return;
     }
@@ -257,7 +264,7 @@ export class Bridge {
       } else await reply(removed ? `Cancelled ${removed} queued message(s) in this conversation.` : 'No active task in your conversation.');
       return;
     }
-    if (!prompt || prompt.length > 16_000) { await o.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
+    if (!prompt || prompt.length > 16_000) { await this.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
     if (verb === 'reset' && o.linkedSession) {
       await reply('This agent continues a pinned session across linked rooms. Reset is disabled; explicitly reconfigure its session link to replace that history.'); return;
     }
@@ -285,7 +292,7 @@ export class Bridge {
     const current: Active = { room, event, key, backendKey, sender: event.sender, controller, running: false, failed: false,
       ready, markReady, publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
     this.active = current;
-    const stopTyping = o.typing ? taskTyping((typing, timeout) => o.typing!(room, typing, timeout),
+    current.typing = o.typing ? taskTyping((typing, timeout) => o.typing!(room, typing, timeout),
       async () => await o.isPrivateRoom(room, current.sender) && o.isAuthorized(current.sender), o.report, controller.signal) : undefined;
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -317,7 +324,8 @@ export class Bridge {
               requestSignal.throwIfAborted();
             }
             if (o.confirmation) await o.confirmation(room, requestEvent, text, controls, markdown);
-            else await o.reply(room, requestEvent, text);
+            else await this.reply(room, requestEvent, text);
+            if (o.confirmation) this.refreshTyping(room);
           });
         const publish: PublishAction | undefined = o.publish ? async (input, callSignal) => {
           if (current.publication) throw new PublicError('A publication review is already pending.');
@@ -355,6 +363,7 @@ export class Bridge {
             await this.authorize(room, current);
             signal.throwIfAborted();
             await o.sendAttachments!(room, requestEvent, files, signal);
+            this.refreshTyping(room);
           } : undefined,
           background: o.background ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
@@ -367,7 +376,7 @@ export class Bridge {
             turnLifetime.signal.throwIfAborted();
             await this.authorize(room, current);
             turnLifetime.signal.throwIfAborted();
-            await o.reply(room, requestEvent, text, true, 'm.text');
+            await this.reply(room, requestEvent, text, true, 'm.text');
           },
         };
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
@@ -388,6 +397,7 @@ export class Bridge {
           if (!files.length) return;
           if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
           await o.sendAttachments(room, responseEvent, files, controller.signal);
+          this.refreshTyping(room);
         };
         // A peer-started turn, or any turn in a shared room, may decline to
         // answer: the text is dropped, attachments are still sent. Commands
@@ -397,12 +407,12 @@ export class Bridge {
         if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
-          const respond = (body: string) => o.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions);
+          const respond = (body: string) => this.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions);
           // A declined reply sends no text and wakes nobody.
           if (!quiet && (text || mentions)) await respond(text);
           else if (!quiet && !files.length) await respond(typeof result === 'string' ? 'The task completed without a text response.' : 'The task completed without a response.');
           if (!mentions) await sendFiles();
-          if (!quiet && mention?.error) await o.reply(room, responseEvent, mention.error);
+          if (!quiet && mention?.error) await this.reply(room, responseEvent, mention.error);
         }
         while (current.buffered) await current.steering;
         next = current.followups.shift();
@@ -422,7 +432,7 @@ export class Bridge {
     } finally {
       current.interactions.close();
       clearTimeout(timeout);
-      await stopTyping?.();
+      await current.typing?.close();
       this.active = undefined;
       void this.drainQueued().catch(o.report);
     }
@@ -448,7 +458,7 @@ export class Bridge {
     await this.authorize(room, current);
     if (this.active !== current || !o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
     const answer = current.interactions.react(relation.event_id, relation.key!);
-    if (answer) await o.reply(room, current.event, answer);
+    if (answer) await this.reply(room, current.event, answer);
   }
 
   private async authorize(room: string, active: Active): Promise<void> {
@@ -472,7 +482,7 @@ export class Bridge {
 
   private async steer(active: Active, room: string, event: MatrixEvent, prompt: string, feedback = false): Promise<void> {
     const o = this.options;
-    if (active.buffered + active.followups.length >= 10) { await o.reply(room, event, 'Too many pending messages. Wait for the agent to catch up.'); return; }
+    if (active.buffered + active.followups.length >= 10) { await this.reply(room, event, 'Too many pending messages. Wait for the agent to catch up.'); return; }
     active.buffered++;
     const operation = active.steering.then(async () => {
       const attachments = await this.receive(room, event, active);
@@ -484,13 +494,13 @@ export class Bridge {
         active.backendKey, active.controller.signal, active.sender, attachments);
       if (!accepted) active.followups.push({ prompt, event, attachments });
       try {
-        if (!feedback) await o.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');
+        if (!feedback) await this.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');
       } catch (error) { o.report(error); }
     }).catch(async error => {
       o.report(error);
       const message = active.controller.signal.aborted ? 'Your update was not applied because the task was stopped.'
         : errorMessage(error, 'Could not confirm delivery of your update to the agent') + ' Please check the task result before resending.';
-      try { await o.reply(room, event, message); } catch (replyError) { o.report(replyError); }
+      try { await this.reply(room, event, message); } catch (replyError) { o.report(replyError); }
     }).finally(() => { active.buffered--; });
     active.steering = operation;
     await operation;
