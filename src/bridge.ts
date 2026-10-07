@@ -296,7 +296,6 @@ export class Bridge {
     try {
       background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
-      else if (!feedback && !o.shared?.(room) && (verb === 'codex' || verb === 'claude')) await reply('…');
       const attachments: IncomingAttachment[] = [];
       for (const input of batch.length ? batch : [event]) attachments.push(...await this.receive(room, input, current));
       const initialPrompt = batch.length > 1 ? 'Queued messages from the same human in this conversation, in order:\n'

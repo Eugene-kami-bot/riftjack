@@ -122,8 +122,8 @@ the same agent session in two connectors.
   shared room addresses both. Plain text spelling a display name is not a mention.
 - In the shared room an agent may answer a human message with exactly
   `NO_REPLY`, for example when it addresses the other agent; nothing is sent
-  then. Shared-room turns therefore start without the `…` acknowledgement.
-  Command results are always sent, and private chats keep the acknowledgement.
+  then. Command results are always sent. Ordinary turns in both shared and
+  private rooms use the task activity indicator without a separate acknowledgement.
 - Another room never steers a running task. Its messages enter a persistent queue
   and run in their own room later. Same-room updates retain existing steering.
   Threads remain separate delivery and approval scopes even with a linked session.

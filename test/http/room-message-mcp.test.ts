@@ -156,7 +156,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
     rmSync(cli + '.completed', { force: true }); order.length = 0;
     await bridge.handle('!home:test', { type: 'm.room.message', event_id: '$' + n, sender: '@alice:test', origin_server_ts: Date.now(),
       content: { msgtype: 'm.text', body: 'Share the result.' } });
-    assert.deepEqual(order, ['…', 'Ready.', 'File sent', 'Delivered.']);
+    assert.deepEqual(order, ['Ready.', 'File sent', 'Delivered.']);
   }
   const connections = readFileSync(cli + '.connections', 'utf8').trim().split('\n').map(s => JSON.parse(s));
   assert.equal(connections.length, 2);

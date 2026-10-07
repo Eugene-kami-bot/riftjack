@@ -133,7 +133,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
     const event: MatrixEvent = { type: 'm.room.message', event_id: '$' + n, sender: '@alice:test', origin_server_ts: Date.now(),
       content: { msgtype: 'm.text', body: 'Send a file and continue.', 'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } };
     await bridge.handle('!shared:test', event);
-    assert.deepEqual(order, ['…', 'Sending a ready file.', 'ready', 'Done', 'later']);
+    assert.deepEqual(order, ['Sending a ready file.', 'ready', 'Done', 'later']);
   }
   const connections = readFileSync(cli + '.connections', 'utf8').trim().split('\n').map(s => JSON.parse(s));
   assert.equal(connections.length, 2);

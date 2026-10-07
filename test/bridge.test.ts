@@ -419,7 +419,7 @@ test('attachment replies go through the media sender with the original event', a
     },
   });
   await f.bridge.handle('!dm:test', incoming);
-  assert.equal(sends, 1); assert.deepEqual(f.replies, ['…']);
+  assert.equal(sends, 1); assert.deepEqual(f.replies, []);
 });
 
 for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' handles owner !restart locally and ignores replay', async t => {
@@ -606,16 +606,16 @@ test('same-conversation messages steer in order, once, without cancelling or run
 });
 
 test('steering received before the initial backend starts waits for readiness', async t => {
-  const acknowledging = gate(), acknowledged = gate(), finish = gate();
+  const preparing = gate(), prepared = gate(), finish = gate();
   let running = false, steered = false;
   const f = fixture(t, 'codex', async () => { running = true; await finish.promise; return 'done'; }, true, {
-    reply: async (_room, _event, text) => { if (text === '…') { acknowledging.release(); await acknowledged.promise; } },
+    receive: async () => { preparing.release(); await prepared.promise; return { path: '/note.txt', name: 'note.txt', mimetype: 'text/plain', size: 1, image: false }; },
     steer: async () => { assert.equal(running, true); steered = true; return true; },
   });
-  const task = f.bridge.handle('!dm:test', event());
-  await acknowledging.promise;
+  const task = f.bridge.handle('!dm:test', { ...event(), content: { msgtype: 'm.file', body: 'hello' } });
+  await preparing.promise;
   const update = f.bridge.handle('!dm:test', event('clarification', '$2'));
-  acknowledged.release(); await update;
+  prepared.release(); await update;
   assert.equal(steered, true); finish.release(); await task;
 });
 

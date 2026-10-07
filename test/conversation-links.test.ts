@@ -872,7 +872,7 @@ test('an agent may decline a shared-room human message with NO_REPLY, but not a 
   // No acknowledgement and no answer in the shared room.
   assert.equal(replies.length, 0);
   await bridge.handle(home, message('Hello', '$private'));
-  assert.deepEqual(replies, [[home, '…'], [home, 'NO_REPLY']]);
+  assert.deepEqual(replies, [[home, 'NO_REPLY']]);
   assert.match(routingInstructions, /Only in shared rooms:[^]*exactly NO_REPLY/);
   // Declining drops only the text: attachments are still delivered.
   const sent: string[] = [];
