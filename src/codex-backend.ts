@@ -222,7 +222,14 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       const completed = await current.done.promise;
       await progress;
       signal.throwIfAborted();
-      if (completed.status !== 'completed') throw new PublicError(completed.status === 'interrupted' ? 'Codex task was interrupted.' : 'Codex task failed. Please retry.');
+      if (completed.status !== 'completed') {
+        // Classify only structured, known codes. Server messages/details may contain sensitive data.
+        const message = completed.status === 'interrupted' ? 'Codex task was interrupted.'
+          : completed.status === 'failed' && completed.error?.codexErrorInfo === 'cyberPolicy'
+            ? 'Codex stopped this task because its safety filter flagged a possible cybersecurity risk (cyberPolicy).'
+            : 'Codex task failed.';
+        throw new PublicError(message);
+      }
       for (const item of completed.items || []) if (item.type === 'agentMessage') current.messages.set(item.id, item);
       const messages = [...current.messages.values()].filter(item => item.phase !== 'commentary');
       const reply = parseMediaReply(messages.at(-1)?.text || '', outbox);

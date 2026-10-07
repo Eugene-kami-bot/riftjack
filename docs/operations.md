@@ -30,6 +30,14 @@ Before acknowledging `!restart`, the connector saves the requesting bot, owner, 
 
 To enable `!restart` after upgrading from the old launcher, stop the running connector on the host once, then run `npm --prefix riftjack start`. Starting `src/main.ts` directly does not provide restart support. Ctrl+C or SIGTERM to the supervisor stops the connector without restarting it. `data/connector.pid` continues to identify the child connector process, not its supervisor.
 
+## Codex task failures
+
+A Codex task stopped with `cyberPolicy` is reported as a safety-filter decision
+about possible cybersecurity risk. It does not mean the connector crashed or
+authentication failed. Riftjack does not retry the task automatically or reset
+the conversation. Other unclassified turn failures use a generic failure message;
+raw server error messages and additional details are not forwarded to chat.
+
 ## Crash recovery and rollback
 
 If the connector exits unexpectedly, the supervisor starts it again after a delay that grows from 1 s to 60 s on consecutive failures. It does not restart after a normal shutdown (exit code 0) or invalid configuration or an already-owned data directory (exit code 78). Lock contention also does not trigger code rollback. A connector counts as working once its bots are online and it has kept running for 30 seconds; the supervisor then promotes the snapshot captured before that process launched to `.connector-history/good-*` if it differs from the last working version (the last 10 versions are kept). The snapshot contains `src/`, `package.json`, `package-lock.json` and `tsconfig.json`; later edits on disk are not included. If the files change during startup, before the ready signal, that run creates no working snapshot. Pending launch snapshots are discarded when the child exits and are never used for rollback. If the connector crashes before reaching that point and its code differs from the latest working snapshot, the supervisor moves the current code to `.connector-history/failed-*` and restores the snapshot. When this follows `!restart`, the owner who requested it receives the rollback explanation in the usual restart notice. A rollback after an ordinary crash is reported to the owner in the Bot Manager DM once the manager is back online. `scripts/` (including the fetch Python helper), documentation and `node_modules` are outside these snapshots and are not restored by rollback. Check script compatibility with the restored source separately; run `npm --prefix riftjack ci` yourself if dependencies differ. If the supervisor's own code (`supervisor.ts`, `restart.ts`, `restart-notice.ts`, `history.ts`, `errors.ts`) changed since it started, `!restart` also starts the updated supervisor: the running one launches it as a child and only forwards signals, so its PID, terminal and log stay the same. If the running supervisor predates automatic self-reload, relaunch it on the host.

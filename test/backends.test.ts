@@ -30,10 +30,12 @@ const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 const respond = (id, result) => send({ id, result });
 const threadId = 'thread_1', turnId = 'turn_1';
 let prompt = '', instructions = '', updates = [];
+const turnError = () => fs.existsSync(path.join(__dirname, 'turn-error.json'))
+  ? JSON.parse(fs.readFileSync(path.join(__dirname, 'turn-error.json'), 'utf8')) : null;
 const complete = (text, status = 'completed') => {
   send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'comment', type: 'agentMessage', text: 'Checking the project.', phase: 'commentary' } } });
   send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'answer', type: 'agentMessage', text, phase: 'final_answer' } } });
-  send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, items: [] } } });
+  send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, items: [], error: turnError() } } });
 };
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line); log(message);
@@ -69,6 +71,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (method === 'turn/start') {
     prompt = p.input[0].text;
+    if (prompt.includes('[immediate-fail]')) return respond(id, { turn: { id: turnId, status: 'failed', error: turnError() } });
     send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress', items: [] } } });
     const begin = () => {
       respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
@@ -364,6 +367,39 @@ test('App Server preserves ChatGPT-only authentication, sandbox settings and con
   assert.equal(f.state.session('conversation').codex, 'thread_1');
   await assert.rejects(f.backend('codex', '[fail]', 'conversation', signal(), '@owner:test'), /task failed/);
   assert.equal(await f.backend('codex', 'retry', 'conversation', signal(), '@owner:test'), 'done');
+});
+
+test('Codex reports structured cyber policy failures without exposing diagnostics or retrying', async t => {
+  for (const prompt of ['[fail]', '[immediate-fail]']) {
+    const f = setup(t);
+    writeFileSync(join(f.dir, 'turn-error.json'), JSON.stringify({
+      codexErrorInfo: 'cyberPolicy', message: 'private diagnostic', additionalDetails: 'private details',
+    }));
+    await assert.rejects(f.backend('codex', prompt, 'conversation', signal(), '@owner:test'), error => {
+      assert.match(String(error), /safety filter.*possible cybersecurity risk.*cyberPolicy/);
+      assert.doesNotMatch(String(error), /private|retry/i);
+      return true;
+    });
+    assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+    assert.equal(f.state.session('conversation').codex, 'thread_1');
+  }
+});
+
+test('Codex does not infer a policy category from free text or unknown error values', async t => {
+  for (const codexErrorInfo of [null, 'futureCategory-private', { cyberPolicy: 'private' }]) {
+    const f = setup(t);
+    writeFileSync(join(f.dir, 'turn-error.json'), JSON.stringify({
+      codexErrorInfo, message: 'cyberPolicy private diagnostic', additionalDetails: 'private details',
+    }));
+    await assert.rejects(f.backend('codex', '[fail]', 'conversation', signal(), '@owner:test'),
+      { message: 'Codex task failed.' });
+  }
+});
+
+test('Codex success is not overridden by a policy field on the turn', async t => {
+  const f = setup(t);
+  writeFileSync(join(f.dir, 'turn-error.json'), JSON.stringify({ codexErrorInfo: 'cyberPolicy' }));
+  assert.equal(await f.backend('codex', 'hello', 'conversation', signal(), '@owner:test'), 'done');
 });
 
 test('API-key accounts cannot start a model turn', async t => {

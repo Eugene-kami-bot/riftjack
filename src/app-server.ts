@@ -6,7 +6,7 @@ import { PublicError } from './errors.js';
 import { codexAccountFailure } from './auth-diagnostics.js';
 
 export type AgentMessage = { type: string; id: string; text?: string; phase?: string | null };
-export type Turn = { id: string; status: string; items?: AgentMessage[] };
+export type Turn = { id: string; status: string; items?: AgentMessage[]; error?: { codexErrorInfo?: unknown } | null };
 export type Notification = { method: string; params: { threadId?: string; turnId?: string; turn?: Turn; item?: AgentMessage; requestId?: string | number; tokenUsage?: { last?: { totalTokens?: number }; modelContextWindow?: number | null } } };
 export type ServerRequest = { id: string | number; method: string; params: Record<string, any> };
 export type RequestHandler = (request: ServerRequest, signal: AbortSignal) => Promise<object | undefined>;
