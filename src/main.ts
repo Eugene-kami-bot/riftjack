@@ -274,8 +274,8 @@ async function main() {
           stopping: () => stopping,
           send: (target, content) => client.sendMessage(target, content),
         }),
-      compaction: (phase, { room, sender }) => sendCompactionNotice(phase,
-        linkedAgent?.home ?? room, {
+      compactionRoom: linkedAgent?.home,
+      compaction: (phase, { room, sender }) => sendCompactionNotice(phase, room, {
           // Use the strict two-person check here, not privateRoom which also
           // authorizes linked shared rooms. No fallback to a shared destination.
           allowed: target => isPrivateRoom(client, target, account.userId, sender, authorized),

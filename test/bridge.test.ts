@@ -918,12 +918,13 @@ test('compaction service hook uses the human identity, and delivery failure does
 });
 
 
-for (const delivery of ['progress', 'attachment'] as const) test(`typing clears before ${delivery} delivery and resumes after a delay while the task is active`, async t => {
+for (const delivery of ['progress', 'attachment', 'compaction'] as const) test(`typing clears before ${delivery} delivery and resumes after a delay while the task is active`, async t => {
   const ready = gate(), finish = gate();
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let visible = false, serverTyping = false;
   const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
-    if (delivery === 'progress') await hooks!.progress!('Still working');
+    if (delivery === 'compaction') await hooks!.compaction!('completed');
+    else if (delivery === 'progress') await hooks!.progress!('Still working');
     else await hooks!.sendAttachments!([{ root: '/outbox', path: '/outbox/file.txt' }], new AbortController().signal);
     ready.release(); await finish.promise;
     return 'done';
@@ -935,6 +936,7 @@ for (const delivery of ['progress', 'attachment'] as const) test(`typing clears 
     },
     reply: async () => { assert.equal(serverTyping, false); visible = false; },
     sendAttachments: async () => { assert.equal(serverTyping, false); visible = false; },
+    compaction: async () => { visible = false; },
   });
   const task = f.bridge.handle('!dm:test', event());
   try {
@@ -946,4 +948,45 @@ for (const delivery of ['progress', 'attachment'] as const) test(`typing clears 
     assert.equal(visible, true);
   } finally { finish.release(); await task; }
   assert.equal(visible, false);
+});
+
+
+test('a compaction notice sent home does not disturb typing in the active shared room', async t => {
+  const ready = gate(), finish = gate(), notices: string[] = [], updates: [string, boolean][] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.compaction!('started');
+    ready.release(); await finish.promise;
+    return 'done';
+  }, true, {
+    compactionRoom: '!home:test',
+    compaction: async (_phase, { room }) => { notices.push(room); },
+    typing: async (room, value) => { updates.push([room, value]); },
+  });
+  const task = f.bridge.handle('!shared:test', event());
+  try {
+    await ready.promise;
+    assert.deepEqual(notices, ['!home:test']);
+    assert.deepEqual(updates, [['!shared:test', true]]);
+  } finally { finish.release(); await task; }
+  assert.equal(updates.at(-1)![1], false);
+});
+
+test('an interrupted compaction notice is delivered after cancellation without restoring typing', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const ready = gate(), notices: string[] = [], updates: boolean[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal, _sender, _files, _interact, _publish, hooks) => {
+    ready.release();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    await hooks!.compaction!('unconfirmed');
+    signal.throwIfAborted(); return 'done';
+  }, true, {
+    compaction: async phase => { notices.push(phase); },
+    typing: async (_room, value) => { updates.push(value); },
+  });
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  f.bridge.stop(); await task;
+  t.mock.timers.tick(30_000); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(notices, ['unconfirmed']);
+  assert.equal(updates.filter(Boolean).length, 1);
+  assert.equal(updates.at(-1), false);
 });

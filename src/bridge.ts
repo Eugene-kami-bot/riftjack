@@ -59,6 +59,8 @@ type Options = {
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
+  // Compaction notices may be routed to a private home while work runs in a shared room.
+  compactionRoom?: string;
   compaction?: (phase: CompactionPhase, context: { room: string; sender: string }) => Promise<void>;
   linkedSession?: (room: string, event: MatrixEvent) => string;
   decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
@@ -346,7 +348,8 @@ export class Bridge {
               // Unlike progress, an interrupted-compaction notice is useful after
               // cancellation too. The destination rechecks access independently.
               if (!o.isAuthorized(current.sender)) return;
-              await o.compaction!(phase, { room, sender: current.sender });
+              const destination = o.compactionRoom ?? room;
+              await this.deliver(destination, () => o.compaction!(phase, { room: destination, sender: current.sender }));
             } catch (error) { o.report(error); }
           } : undefined,
           roomMessages: messages ? async (input, callSignal, outbox) => {
