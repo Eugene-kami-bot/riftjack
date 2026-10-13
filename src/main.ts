@@ -16,6 +16,7 @@ import { loadConfig, type Config } from './config.js';
 import { State } from './state.js';
 import { WorkerBridge } from './worker-bridge.js';
 import { WorkerMatrixClient } from './worker-matrix-client.js';
+import { MessageMatrixClient } from './message-matrix-client.js';
 import { WorkerQueue } from './worker-queue.js';
 import { WorkerService } from './worker-service.js';
 import { WorkerServer } from './worker-server.js';
@@ -188,7 +189,9 @@ async function main() {
     const storage = new SimpleFsStorageProvider(join(dir, 'matrix.json'));
     const crypto = new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite);
     if (account.kind === 'grok' && !config.workerPort) throw new PublicError('Set WORKER_PORT to enable the Grok worker connection.');
+    const recoverMessages = account.kind === 'codex' || account.kind === 'claude';
     const client = account.kind === 'grok' ? new WorkerMatrixClient(config.homeserver, account.accessToken, storage, crypto)
+      : recoverMessages ? new MessageMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : new MatrixClient(config.homeserver, account.accessToken, storage, crypto);
     const media = new MatrixMedia(client, { workspace: botConfig.workspace, homeserver: config.homeserver,
       accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
@@ -200,7 +203,9 @@ async function main() {
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const linkedAgent = links.agent(account.userId);
-    const since = Date.now();
+    const since = recoverMessages ? state.messageSince(account.userId, Date.now()) : Date.now();
+    if (client instanceof MessageMatrixClient) client.history = { since,
+      heads: () => state.roomHeads(account.userId), save: heads => state.saveRoomHeads(account.userId, heads) };
     const privateRoom = async (room: string, sender: string) => linkedAgent
       ? authorized(sender) && await links.allowed(account.userId, room, sender, () => client.getRoomState(room)) && authorized(sender)
       : isPrivateRoom(client, room, account.userId, sender, authorized);
@@ -283,7 +288,7 @@ async function main() {
           send: (target, content) => client.sendMessage(target, content),
         }),
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
-      since, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
+      since, recoverMessages, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
       typing: (room, typing, timeout) => client.setTyping(room, typing, timeout),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
@@ -418,10 +423,10 @@ async function main() {
       },
     });
     let incoming = Promise.resolve();
-    const prepareIncoming = async (room: string, event: MatrixEvent) => {
+    const routeIncoming = async (room: string, event: MatrixEvent): Promise<boolean> => {
       const shared = links.room(account.userId, room);
       if (shared) {
-        if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return;
+        if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return false;
         links.observe(account.userId, room, event);
         // Other agents are heard as context, never impersonated as the controller.
         // Only an explicit mention paid with peer credit starts a separate connector
@@ -429,18 +434,32 @@ async function main() {
         if (event.sender !== shared.owner) {
           const mention = links.mention(account.userId, room, event);
           if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
-          return;
+          return false;
         }
-        if (!links.addressed(account.userId, room, event)) return;
+        if (!links.addressed(account.userId, room, event)) return false;
+      }
+      return true;
+    };
+    const prepareIncoming = async (room: string, event: MatrixEvent) => {
+      if (!(await routeIncoming(room, event))) {
+        if (recoverMessages && event.event_id) state.completeMessages(account.userId, [event.event_id]);
+        return;
       }
       // Serialize admission/observations, not model work: confirmations and
       // same-room steering must still get through while the agent is running.
       void bridge.handle(room, event).catch(diagnostics);
     };
-    const inbox = (room: string, event: MatrixEvent) => { incoming = incoming.then(() => prepareIncoming(room, event)).catch(diagnostics); };
-    if (account.kind !== 'grok') client.on('room.message', inbox);
+    const inbox = (room: string, event: MatrixEvent) => {
+      // Capture before the first await, including before room routing checks.
+      if (bridge instanceof Bridge) bridge.capture(room, event);
+      incoming = incoming.then(() => prepareIncoming(room, event)).catch(diagnostics);
+    };
+    if (client instanceof MessageMatrixClient) {
+      client.inbox = async (room, event) => { inbox(room, event); };
+      client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
+    } else if (account.kind !== 'grok') client.on('room.message', inbox);
     client.on('room.event', (room: string, event: MatrixEvent) => {
-      if (account.kind !== 'grok' && event.type === 'm.reaction') inbox(room, event);
+      if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') inbox(room, event);
     });
     client.on('room.invite', (room: string, event: MatrixEvent) => {
       if (event.sender && authorized(event.sender)) void client.joinRoom(room).catch(diagnostics);
@@ -497,6 +516,9 @@ async function main() {
         diagnostics(error);
       }
       phase('deviceIdentity');
+      // Reserve the bridge before sync admits new input. Recovery runs without
+      // blocking Matrix controls or startup of the other accounts.
+      if (bridge instanceof Bridge && recoverMessages) void bridge.recoverMessages(routeIncoming).catch(diagnostics);
       await client.start();
       // start() launches the sync loop without waiting for the first /sync response.
       phase('clientStart');

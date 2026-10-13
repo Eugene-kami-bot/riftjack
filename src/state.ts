@@ -5,8 +5,9 @@ import type { CheckpointState } from './context-checkpoints.js';
 import { AGENT_TRIGGER, NOTICE, type MatrixEvent } from './bridge.js';
 
 export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport; codexCheckpoint?: CheckpointState; claudeCheckpoint?: CheckpointState };
-type Pending = { room: string; event: MatrixEvent; feedback: boolean };
-type Data = { version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]> };
+export type Pending = { room: string; event: MatrixEvent; feedback: boolean };
+type Recoverable = Pending & { attempted: boolean };
+type Data = { version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]>; messages?: Record<string, Recoverable[]>; messageSince?: Record<string, number>; roomHeads?: Record<string, Record<string, string>> };
 
 export class State {
   private data: Data;
@@ -16,6 +17,47 @@ export class State {
     if (this.data.version !== 1 || !this.data.sessions || !Array.isArray(this.data.seen)) {
       throw new Error('Invalid state file. Restore it from a backup before restarting.');
     }
+  }
+  messageSince(bot: string, now: number): number {
+    const since = (this.data.messageSince ??= {})[bot] ??= now;
+    this.save(); return since;
+  }
+  roomHeads(bot: string): Record<string, string> { return { ...this.data.roomHeads?.[bot] }; }
+  saveRoomHeads(bot: string, heads: Record<string, string>) {
+    (this.data.roomHeads ??= {})[bot] = heads; this.save();
+  }
+  rememberMessage(bot: string, message: Pending): void {
+    const id = message.event.event_id;
+    if (!id || this.data.seen.includes(JSON.stringify([bot, id]))) return;
+    const messages = (this.data.messages ??= {})[bot] ??= [];
+    if (messages.some(m => m.event.event_id === id)) return;
+    messages.push({ ...message, attempted: false }); this.save();
+  }
+  recoverable(bot: string): Recoverable[] { return [...this.data.messages?.[bot] ?? []]; }
+  attempted(bot: string, ids: string[]) {
+    for (const message of this.data.messages?.[bot] ?? []) if (ids.includes(message.event.event_id!)) message.attempted = true;
+    this.save();
+  }
+  completeMessages(bot: string, ids: string[]) {
+    if (this.data.messages?.[bot]) this.data.messages[bot] = this.data.messages[bot].filter(m => !ids.includes(m.event.event_id!));
+    if (this.data.pending?.[bot]) this.data.pending[bot] = this.data.pending[bot].filter(m => !ids.includes(m.event.event_id!));
+    for (const id of ids) {
+      const key = JSON.stringify([bot, id]);
+      if (!this.data.seen.includes(key)) this.data.seen.push(key);
+    }
+    this.data.seen = this.data.seen.slice(-10_000); this.save();
+  }
+  removePending(bot: string, ids: string[]) {
+    if (this.data.pending?.[bot]) this.data.pending[bot] = this.data.pending[bot].filter(m => !ids.includes(m.event.event_id!));
+    this.save();
+  }
+  cancelMessages(bot: string, room: string, sender: string, thread: string | null) {
+    const ids = this.recoverable(bot).filter(m => {
+      const relation = m.event.content?.['m.relates_to'];
+      return m.room === room && m.event.sender === sender &&
+        (relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null) === thread;
+    }).map(m => m.event.event_id!);
+    this.completeMessages(bot, ids); return ids.length;
   }
   session(key: string): Session { return { ...this.data.sessions[key] }; }
   update(key: string, value: Session) {

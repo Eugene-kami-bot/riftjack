@@ -149,9 +149,10 @@ the same agent session in two connectors.
   The queue accepts 20 messages and explicitly reports overflow.
 
 Queued messages survive restart and access is checked again before execution.
-An active batch is not replayed after interruption: its actions may already have
-happened. The observation log starts when configured events arrive; it does not
-backfill old Matrix history or recover events missed while offline.
+Unfinished human messages are recovered after restart with a warning to inspect
+actions that may already have happened. Codex and Claude catch up on accessible
+Matrix history from their saved synchronization checkpoint. Deleted history or
+messages for which the bot has no decryption keys cannot be recovered.
 
 
 ## Peer mentions

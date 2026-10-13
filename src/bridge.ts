@@ -39,6 +39,7 @@ type Options = {
   isPrivateRoom: (room: string, sender: string) => Promise<boolean>;
   state: State; run: Backend;
   steer?: Steer;
+  recoverMessages?: boolean;
   queuedUpdateMessage?: string;
   owner?: string;
   ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
@@ -83,6 +84,7 @@ type Active = {
   room: string; event: MatrixEvent;
   key: string; backendKey: string; sender: string; controller: AbortController; running: boolean; failed: boolean;
   ready: Promise<void>; markReady: () => void; steering: Promise<void>; buffered: number; followups: Followup[];
+  inputIds: string[]; cancelled?: boolean;
   interactions: Interactions; publication?: boolean; typing?: ReturnType<typeof taskTyping>;
 };
 
@@ -95,6 +97,9 @@ export class Bridge {
   private active?: Active;
   private stopped = false;
   private draining = false;
+  private retained = new Set<string>();
+  private replaying = new Set<string>();
+  private recoveryNotes = new Set<string>();
   private admission = Promise.resolve();
   constructor(private options: Options) {}
   private deliver<T>(room: string, send: () => Promise<T>): Promise<T> {
@@ -104,15 +109,53 @@ export class Bridge {
   private reply(...args: Parameters<Options['reply']>): Promise<void> {
     return this.deliver(args[0], () => this.options.reply(...args));
   }
-  get busy(): boolean { return !!this.active || this.draining || (!!this.options.linkedSession && this.options.state.queued(this.options.botId) > 0); }
+  get busy(): boolean { return !!this.active || this.draining || (!!(this.options.linkedSession || this.options.recoverMessages) && this.options.state.queued(this.options.botId) > 0); }
   stop() { this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) { if (this.active?.sender === sender) this.active.controller.abort(); }
+  // Called synchronously by the Matrix inbox before /sync advances its checkpoint.
+  capture(room: string, event: MatrixEvent): void {
+    const o = this.options;
+    if (!o.recoverMessages || !event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId ||
+        event.type !== 'm.room.message' || !event.event_id || event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE] ||
+        event.content?.[SERVICE] || event.content?.['m.relates_to']?.rel_type === 'm.replace' ||
+        !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since ||
+        (event.content?.msgtype !== 'm.text' && !isMedia(event.content?.msgtype)) ||
+        (!isMedia(event.content?.msgtype) && event.content?.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '').trim().startsWith('!'))) return;
+    o.state.rememberMessage(o.botId, { room, event, feedback: false });
+  }
+  async recoverMessages(route: (room: string, event: MatrixEvent) => Promise<boolean> = async () => true): Promise<void> {
+    if (!this.options.recoverMessages || this.active || this.draining) return;
+    const o = this.options, pending = o.state.recoverable(o.botId);
+    this.draining = true;
+    try {
+      for (const message of pending) {
+        if (this.stopped || o.isStopping?.()) break;
+        const id = message.event.event_id!;
+        if (!o.state.recoverable(o.botId).some(m => m.event.event_id === id)) continue;
+        if (!message.event.sender || !o.isAuthorized(message.event.sender) || !(await route(message.room, message.event))) {
+          o.state.completeMessages(o.botId, [id]); continue;
+        }
+        o.state.removePending(o.botId, [id]);
+        this.replaying.add(id);
+        if (message.attempted) this.recoveryNotes.add(id);
+        try {
+          await this.handleMessage(message.room, message.event, false, undefined, true);
+          if (!this.retained.has(id)) o.state.completeMessages(o.botId, [id]);
+        }
+        catch (error) { o.report(error); }
+        finally { this.replaying.delete(id); this.recoveryNotes.delete(id); }
+      }
+    } finally { this.draining = false; void this.drainQueued().catch(o.report); }
+  }
   async handle(room: string, event: MatrixEvent): Promise<void> {
     const o = this.options;
     // Locally created turns are never accepted from Matrix.
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId || event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE]) return;
     if (event.type === 'm.reaction') { await this.handleReaction(room, event); return; }
+    if (this.replaying.has(event.event_id!)) return;
+    this.capture(room, event);
     await this.handleMessage(room, event);
+    if (o.recoverMessages && event.event_id && !this.retained.has(event.event_id)) o.state.completeMessages(o.botId, [event.event_id]);
   }
 
   // A budgeted peer mention prepared by the conversation links. It runs in the
@@ -131,7 +174,7 @@ export class Bridge {
   }
 
   async drainQueued(): Promise<void> {
-    if (!this.options.linkedSession || this.draining || this.active || this.stopped || this.options.isStopping?.()) return;
+    if ((!this.options.linkedSession && !this.options.recoverMessages) || this.draining || this.active || this.stopped || this.options.isStopping?.()) return;
     this.draining = true;
     try {
       while (!this.active && !this.stopped && !this.options.isStopping?.()) {
@@ -190,7 +233,13 @@ export class Bridge {
     // order, then release before any model work so controls/steering can proceed.
     admitted();
     const reply = (text: string) => this.reply(room, event, text);
-    if (this.stopped || o.isStopping?.()) { await reply('The connector is restarting or stopping. Please retry in a few seconds.'); return; }
+    if (this.stopped || o.isStopping?.()) {
+      const saved = o.recoverMessages && o.state.recoverable(o.botId).some(m => m.event.event_id === event.event_id);
+      if (saved) this.retained.add(event.event_id);
+      await reply(saved ? 'The connector is restarting or stopping. Your message will be recovered after restart.'
+        : 'The connector is restarting or stopping. Please retry in a few seconds.');
+      return;
+    }
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
       const current = this.active;
       if (!current || current.key !== key || current.sender !== event.sender) { await reply('No pending confirmation in this conversation.'); return; }
@@ -258,12 +307,14 @@ export class Bridge {
     }
     if (verb === 'cancel') {
       const relation = event.content?.['m.relates_to'];
-      const removed = o.linkedSession ? o.state.cancelQueued(o.botId, room, event.sender,
-        relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null) : 0;
+      const thread = relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null;
+      const removed = (o.linkedSession || o.recoverMessages) ? o.state.cancelQueued(o.botId, room, event.sender, thread) : 0;
+      const saved = o.recoverMessages ? o.state.cancelMessages(o.botId, room, event.sender, thread) : 0;
       if (this.active?.key === key) {
+        this.active.cancelled = true;
         this.active.controller.abort();
         await reply('Cancellation requested. Changes already made are retained.');
-      } else await reply(removed ? `Cancelled ${removed} queued message(s) in this conversation.` : 'No active task in your conversation.');
+      } else await reply(removed || saved ? `Cancelled ${Math.max(removed, saved)} unfinished message(s) in this conversation.` : 'No active task in your conversation.');
       return;
     }
     if (!prompt || prompt.length > 16_000) { await this.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
@@ -276,23 +327,37 @@ export class Bridge {
         // Peer mentions are delivered as their own turn after the current one.
         if (o.state.enqueue(o.botId, { room, event, feedback })) void this.drainQueued().catch(o.report);
         else o.report(new PublicError('A peer mention was dropped because the linked-room queue is full.'));
-      } else if (o.linkedSession && (verb === 'codex' || verb === 'claude') &&
-          (!this.active || (this.active.key !== key && this.active.backendKey === backendKey))) {
+      } else if ((o.linkedSession || o.recoverMessages) && (verb === 'codex' || verb === 'claude') &&
+          (!this.active || (this.active.key !== key && (o.recoverMessages || this.active.backendKey === backendKey)))) {
+        if (o.recoverMessages) this.retained.add(event.event_id);
         const accepted = o.state.enqueue(o.botId, { room, event, feedback });
-        await reply(accepted ? 'Queued for this agent after its current conversation.' : 'The linked-room queue is full. Please resend after the agent finishes.');
+        await reply(accepted ? 'Queued for this agent after its current conversation.' : (o.recoverMessages ? 'The live queue is full. Your message is saved for recovery after restart.' : 'The linked-room queue is full. Please resend after the agent finishes.'));
         void this.drainQueued().catch(o.report);
       } else if ((verb === 'codex' || verb === 'claude') && this.active?.key === key && !this.active.publication && o.steer) {
         await this.steer(this.active, room, event, prompt, feedback);
-      } else await reply(this.active?.publication ? 'A publication review is pending. Use its confirmation controls or !cancel; ordinary messages cannot change the publication.'
-        : 'A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
+      } else {
+        if (o.recoverMessages) this.retained.add(event.event_id);
+        await reply(this.active?.publication
+          ? 'A publication review is pending. Use its confirmation controls or !cancel; ordinary messages cannot change the publication.'
+          : 'A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
+      }
       return;
     }
-    if (verb === 'reset') { o.state.reset(key); await reply('Your conversation state has been reset.'); return; }
+    if (verb === 'reset') {
+      const relation = event.content?.['m.relates_to'];
+      if (o.recoverMessages) o.state.cancelMessages(o.botId, room, event.sender,
+        relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null);
+      o.state.reset(key); await reply('Your conversation state has been reset.'); return;
+    }
     const controller = new AbortController();
     let markReady!: () => void;
     const ready = new Promise<void>(resolve => { markReady = resolve; });
     const current: Active = { room, event, key, backendKey, sender: event.sender, controller, running: false, failed: false,
-      ready, markReady, publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
+      ready, markReady, inputIds: (batch.length ? batch : [event]).map(e => e.event_id!), publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
+    if (o.recoverMessages) {
+      for (const id of current.inputIds) this.retained.add(id);
+      o.state.attempted(o.botId, current.inputIds);
+    }
     this.active = current;
     current.typing = o.typing ? taskTyping((typing, timeout) => o.typing!(room, typing, timeout),
       async () => await o.isPrivateRoom(room, current.sender) && o.isAuthorized(current.sender), o.report, controller.signal) : undefined;
@@ -309,7 +374,9 @@ export class Bridge {
       for (const input of batch.length ? batch : [event]) attachments.push(...await this.receive(room, input, current));
       const initialPrompt = batch.length > 1 ? 'Queued messages from the same human in this conversation, in order:\n'
         + JSON.stringify(batch.map(e => ({ id: e.event_id, text: e.content?.body, type: e.content?.msgtype }))) : prompt;
-      let next: Followup | undefined = { prompt: initialPrompt, event, attachments };
+      let next: Followup | undefined = { prompt: this.recoveryNotes.has(event.event_id!)
+        ? 'Connector recovery after restart: the previous turn for this message did not finish successfully. It may have performed actions or sent replies already. Inspect the existing results before continuing; do not blindly repeat external actions or reuse expired confirmations. Original message follows:\n\n' + initialPrompt
+        : initialPrompt, event, attachments };
       while (next) {
         controller.signal.throwIfAborted();
         await this.authorize(room, current);
@@ -415,6 +482,10 @@ export class Bridge {
           if (!quiet && mention?.error) await this.reply(room, responseEvent, mention.error);
         }
         while (current.buffered) await current.steering;
+        const completed = current.inputIds.filter(id => !current.followups.some(f => f.event.event_id === id));
+        if (o.recoverMessages) o.state.completeMessages(o.botId, completed);
+        for (const id of completed) this.retained.delete(id);
+        current.inputIds = current.inputIds.filter(id => !completed.includes(id));
         next = current.followups.shift();
       }
     } catch (error) {
@@ -426,10 +497,16 @@ export class Bridge {
         try { await o.ownerDiagnostic?.(error, { room, sender: current.sender }); }
         catch (deliveryError) { o.report(deliveryError); }
       }
-      await reply(controller.signal.aborted
+      await reply(o.recoverMessages && !current.cancelled && current.inputIds.some(id => o.state.recoverable(o.botId).some(m => m.event.event_id === id))
+        ? errorMessage(error) + ' Your unfinished messages are saved. Restart Riftjack to resume them; actions already performed may need checking.'
+        : controller.signal.aborted
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
     } finally {
+      if (current.cancelled || !o.isAuthorized(current.sender)) {
+        if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
+        for (const id of current.inputIds) this.retained.delete(id);
+      }
       current.interactions.close();
       clearTimeout(timeout);
       await current.typing?.close();
@@ -482,7 +559,17 @@ export class Bridge {
 
   private async steer(active: Active, room: string, event: MatrixEvent, prompt: string, feedback = false): Promise<void> {
     const o = this.options;
-    if (active.buffered + active.followups.length >= 10) { await this.reply(room, event, 'Too many pending messages. Wait for the agent to catch up.'); return; }
+    if (active.buffered + active.followups.length >= 10) {
+      if (o.recoverMessages) this.retained.add(event.event_id!);
+      await this.reply(room, event, o.recoverMessages
+        ? 'Too many pending updates. Your message is saved for recovery after restart.'
+        : 'Too many pending messages. Wait for the agent to catch up.'); return;
+    }
+    if (o.recoverMessages) {
+      this.retained.add(event.event_id!);
+      active.inputIds.push(event.event_id!);
+      o.state.attempted(o.botId, [event.event_id!]);
+    }
     active.buffered++;
     const operation = active.steering.then(async () => {
       const attachments = await this.receive(room, event, active);
@@ -497,6 +584,7 @@ export class Bridge {
         if (!feedback) await this.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');
       } catch (error) { o.report(error); }
     }).catch(async error => {
+      active.inputIds = active.inputIds.filter(id => id !== event.event_id);
       o.report(error);
       const message = active.controller.signal.aborted ? 'Your update was not applied because the task was stopped.'
         : errorMessage(error, 'Could not confirm delivery of your update to the agent') + ' Please check the task result before resending.';

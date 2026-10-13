@@ -133,7 +133,7 @@ Claude steers updates from the active conversation into the running task when it
 
 **Codex steering:** while a Codex bot is working, send another message in the same room/thread from the same Matrix account. The connector delivers it to the active task with Codex App Server's `turn/steer`; it does not cancel or restart the task. Text, images, files, and audio attachments can all accompany an update. You receive an acknowledgement after Codex accepts it. During startup, updates wait until the active turn is ready. If the task has already finished, the message runs as the next turn in the same conversation. At most 10 updates/follow-ups can await delivery at once; each text/caption is limited to 16,000 characters. Delivery is serialized, and duplicate Matrix events are ignored.
 
-Messages from a different account, room, thread, or bot cannot steer the current task. Different bots can run in parallel, but each bot has only one active task. An ordinary bot refuses another conversation while busy; a linked agent queues other-room messages for separate turns. `!reset` requires an idle bot; `!cancel` stops the current task and discards pending follow-ups. The task timeout covers steering and any immediate follow-ups; sending updates does not reset it. Same-conversation pending updates live in memory and are not replayed after a crash/restart. The [linked-room queue](shared-conversations.md#messages-and-turns) is persisted separately. If steering delivery fails with an uncertain outcome, the connector reports it rather than automatically repeating the request.
+Messages from a different account, room, thread, or bot cannot steer the current task. Different bots can run in parallel, but each bot has only one active task. Codex and Claude bots queue other-room messages for separate turns. `!reset` requires an idle bot; `!cancel` stops the current task and discards pending follow-ups. The task timeout covers steering and any immediate follow-ups; sending updates does not reset it. Unfinished human messages and updates are saved and recovered after restart. If steering delivery fails with an uncertain outcome, the connector reports it and retains the message for restart recovery, with a warning to check prior effects.
 
 The connector uses the Codex App Server JSONL protocol over private stdio pipes, including `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, and `turn/interrupt`. Existing Codex conversation IDs remain usable. This stdio transport opens no server port; connector MCP tools separately use authenticated loopback HTTP listeners during a task. The App Server account must report ChatGPT authentication before a turn can start.
 
@@ -185,7 +185,29 @@ The connector reads the plugin description, apps and MCP servers from `openai-cu
 
 ## Delivery and formatting
 
-Messages sent before the current startup are ignored, including messages sent while the connector was offline. Duplicate events are recorded before work begins to reduce accidental re-execution. An interrupted task is not automatically replayed after restart. Tasks time out after 24 hours by default. Replies are chunked, with a 100,000-character cap.
+For Codex and Claude, ordinary human messages and attachments are saved before the
+Matrix synchronization checkpoint advances. After restart, Riftjack resumes
+unfinished messages in arrival order and catches up on messages sent while it
+was offline. Limited Matrix timelines are paginated back to the saved room event.
+No new “continue” message is needed. Access, room privacy and shared-room routing
+are checked again. The first startup establishes a history boundary; older
+messages are not imported.
+
+Messages remain recoverable until their turn and final reply delivery succeed.
+A deliberate `NO_REPLY` in a shared room also completes a message. A failed turn
+is retried on restart, not repeatedly within the same connector process.
+`!cancel` discards unfinished messages in that conversation, including messages
+saved after a failed turn; `!reset` does so too for unlinked conversations.
+Commands, approval reactions, peer mentions and scheduled notices are not part
+of this human-message recovery mechanism. Bot Manager keeps its existing
+startup filtering; Grok uses its worker queue.
+
+Recovery is at-least-once processing, not a transaction around the agent's work.
+An interrupted turn may already have changed files, pushed a commit or sent a
+reply. The recovered prompt tells the agent to inspect existing results before
+continuing, and does not renew expired confirmations. A crash between reply
+delivery and saving completion can cause a repeated answer. Recovery depends
+on Matrix retaining accessible history and the bot retaining decryption keys. Tasks time out after 24 hours by default. Replies are chunked, with a 100,000-character cap.
 
 Coding bots also forward user-facing progress messages while a task runs. Codex sends completed `commentary` messages; Claude sends assistant text preceding tool use or a later assistant response. Thinking blocks and tool internals are not forwarded, and the final response is sent separately.
 
