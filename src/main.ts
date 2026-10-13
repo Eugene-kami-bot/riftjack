@@ -20,7 +20,7 @@ import { MessageMatrixClient } from './message-matrix-client.js';
 import { WorkerQueue } from './worker-queue.js';
 import { WorkerService } from './worker-service.js';
 import { WorkerServer } from './worker-server.js';
-import { Bridge, SERVICE, type MatrixEvent } from './bridge.js';
+import { Bridge, sessionKey, SERVICE, type MatrixEvent } from './bridge.js';
 import { replyContent } from './message-format.js';
 import { inlineCode, markdownText, managerBotList } from './manager-format.js';
 import { createMatrixUser, parseUserCreation } from './matrix-users.js';
@@ -141,6 +141,7 @@ async function main() {
   const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
   const workerServer = new WorkerServer();
   const workers = new Map<string, WorkerService>();
+  const startupId = randomBytes(16).toString('hex');
   const backgroundPumps = new Map<string, () => Promise<void>>();
   const backgroundTimer = setInterval(() => { for (const pump of backgroundPumps.values()) void pump().catch(diagnostics); }, 2000);
   backgroundTimer.unref();
@@ -489,6 +490,7 @@ async function main() {
           },
           report: diagnostics,
         });
+        await codingBridge.resumeRestart();
       });
     }
     try {
@@ -518,7 +520,19 @@ async function main() {
       phase('deviceIdentity');
       // Reserve the bridge before sync admits new input. Recovery runs without
       // blocking Matrix controls or startup of the other accounts.
-      if (bridge instanceof Bridge && recoverMessages) void bridge.recoverMessages(routeIncoming).catch(diagnostics);
+      if (bridge instanceof Bridge && recoverMessages) {
+        const home = linkedAgent?.home ?? account.roomId;
+        const sender = linkedAgent?.owner ?? account.inviteUserId ?? config.owner;
+        if (home) {
+          const key = sessionKey(home, { sender, content: linkedAgent?.thread
+            ? { 'm.relates_to': { rel_type: 'm.thread', event_id: linkedAgent.thread } } : undefined });
+          const session = state.session(key)[account.kind as 'codex' | 'claude'];
+          if (session && (!linkedAgent || session === linkedAgent.session)) {
+            bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread);
+          }
+        }
+        void bridge.recoverMessages(routeIncoming).catch(diagnostics);
+      }
       await client.start();
       // start() launches the sync loop without waiting for the first /sync response.
       phase('clientStart');

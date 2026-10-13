@@ -23,7 +23,8 @@ import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reacti
 // timer or reaction feedback), so it is not presented as the human's words.
 export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant',
   NOTICE = 'riftjack.notice';
-export type Notice = 'background' | 'timer' | 'reaction';
+export type Notice = 'background' | 'timer' | 'reaction' | 'restart';
+export const RESTART_PROMPT = 'Riftjack restarted. Check current work and background tasks; continue if there is work to do.';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
@@ -100,6 +101,7 @@ export class Bridge {
   private retained = new Set<string>();
   private replaying = new Set<string>();
   private recoveryNotes = new Set<string>();
+  private restartNotice?: { room: string; event: MatrixEvent; key: string; session: string };
   private admission = Promise.resolve();
   constructor(private options: Options) {}
   private deliver<T>(room: string, send: () => Promise<T>): Promise<T> {
@@ -111,7 +113,28 @@ export class Bridge {
   }
   get busy(): boolean { return !!this.active || this.draining || (!!(this.options.linkedSession || this.options.recoverMessages) && this.options.state.queued(this.options.botId) > 0); }
   stop() { this.stopped = true; this.active?.controller.abort(); }
-  revoke(sender: string) { if (this.active?.sender === sender) this.active.controller.abort(); }
+  revoke(sender: string) {
+    if (this.restartNotice?.event.sender === sender) this.restartNotice = undefined;
+    if (this.active?.sender === sender) this.active.controller.abort();
+  }
+  // One notice per bot startup, only for an existing conversation. No private
+  // task files are read to decide whether to start a turn.
+  scheduleRestart(id: string, room: string, sender: string, session: string, thread?: string): void {
+    if (this.options.kind !== 'codex' && this.options.kind !== 'claude') return;
+    const event: MatrixEvent = { type: 'm.room.message', event_id: `restart:${id}:${this.options.botId}`,
+      sender, origin_server_ts: Date.now(), content: { msgtype: 'm.text', body: RESTART_PROMPT, [NOTICE]: 'restart',
+        ...(thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread } }) } };
+    const key = this.options.linkedSession?.(room, event) ?? sessionKey(room, event);
+    this.restartNotice = { room, event, key, session };
+  }
+  async resumeRestart(): Promise<void> {
+    const notice = this.restartNotice, o = this.options;
+    if (!notice || this.busy || this.stopped || o.isStopping?.()) return;
+    if (!o.isAuthorized(notice.event.sender!) || o.state.session(notice.key)[o.kind as 'codex' | 'claude'] !== notice.session) {
+      this.restartNotice = undefined; return;
+    }
+    await this.resumeBackground(notice.room, notice.event, notice.session, () => {}, () => this.restartNotice === notice);
+  }
   // Called synchronously by the Matrix inbox before /sync advances its checkpoint.
   capture(room: string, event: MatrixEvent): void {
     const o = this.options;
@@ -306,6 +329,7 @@ export class Bridge {
       return;
     }
     if (verb === 'cancel') {
+      if (this.restartNotice?.key === key) this.restartNotice = undefined;
       const relation = event.content?.['m.relates_to'];
       const thread = relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null;
       const removed = (o.linkedSession || o.recoverMessages) ? o.state.cancelQueued(o.botId, room, event.sender, thread) : 0;
@@ -447,8 +471,21 @@ export class Bridge {
             await this.reply(room, requestEvent, text, true, 'm.text');
           },
         };
+        let modelPrompt = next.prompt.startsWith('!') ? next.prompt
+          : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt;
+        if (next.event.content?.[NOTICE] === 'restart' && !o.decoratePrompt) {
+          modelPrompt = 'Connector restart notice (not a human message):\n' + modelPrompt;
+        }
+        const restart = this.restartNotice;
+        if (verb !== 'publish' && !next.prompt.startsWith('!') && restart?.key === backendKey &&
+            o.state.session(backendKey)[o.kind as 'codex' | 'claude'] === restart.session) {
+          if (next.event.content?.[NOTICE] !== 'restart') modelPrompt += '\n\nConnector restart notice:\n' + RESTART_PROMPT;
+          // Consume only when a model turn actually begins, not at privacy
+          // checks or admission. A backend failure gets no immediate retry.
+          this.restartNotice = undefined;
+        }
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, next.prompt.startsWith('!') ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt,
+          : o.run(verb as Mode, modelPrompt,
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
@@ -470,7 +507,7 @@ export class Bridge {
         // answer: the text is dropped, attachments are still sent. Commands
         // always report their result.
         const peerTurn = !!responseEvent.content?.[AGENT_TRIGGER];
-        const quiet = (peerTurn || (!command && !!o.shared?.(room))) && (text.trim() === 'NO_REPLY' || (peerTurn && !text.trim()));
+        const quiet = (responseEvent.content?.[NOTICE] === 'restart' || peerTurn || (!command && !!o.shared?.(room))) && (text.trim() === 'NO_REPLY' || (peerTurn && !text.trim()));
         if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
