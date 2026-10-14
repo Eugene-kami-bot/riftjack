@@ -64,6 +64,19 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     }
     finish('done'); return;
   }
+  if (prompt.includes('[two-results]')) {
+    const assistant = text => output({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    assistant('Before permission');
+    output({ type: 'control_request', request_id: 'two-results-permission', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'date' } } });
+    onResponse = () => {
+      assistant('First answer');
+      finish(prompt.includes('[fallback]') ? undefined : 'First answer');
+      // A background notification can start another turn before this process exits.
+      assistant('Second answer');
+      finish(prompt.includes('[fallback]') ? undefined : 'Second answer');
+    };
+    return;
+  }
   if (prompt.includes('[permission]')) {
     output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
     onResponse = response => finish('Permission ' + response.response.response.behavior);
@@ -634,6 +647,20 @@ test('Claude sends progress around tool use without duplicating final text or ex
   assert.deepEqual(updates, ['Checking the files.', 'Running the checks.']);
   assert.equal(typeof result === 'string' ? result : result.text, 'Claude answer');
 });
+
+for (const fallback of [false, true]) {
+  test(`Claude does not send a completed answer as progress in the next turn (fallback=${fallback})`, async t => {
+    const f = setup(t);
+    const progress: string[] = [];
+    let approvals = 0;
+    const result = await f.backend('claude', '[two-results]' + (fallback ? ' [fallback]' : ''), 'two-results', signal(), '@owner:test', [],
+      async () => { approvals++; return { behavior: 'allow', updatedInput: { command: 'date' } }; }, undefined,
+      { progress: async text => { progress.push(text); } });
+    assert.equal(approvals, 1);
+    assert.deepEqual(progress, ['Before permission']);
+    assert.equal(typeof result === 'string' ? result : result.text, 'First answer\n\nSecond answer');
+  });
+}
 
 test('Claude snapshots dynamic model and tier settings and refreshes them on resume', async t => {
   const f = setup(t), settings = { ...f.config, claudeModel: 'first-model', claudeServiceTier: 'fast' as string | undefined };
