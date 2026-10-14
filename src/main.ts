@@ -475,7 +475,7 @@ async function main() {
         await codingBridge.drainQueued();
         await background.pump({
           valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
-          deliver: (target, event, admitted, ready) => codingBridge.resumeBackground(target.room, event, target.session, admitted, ready),
+          deliver: (target, event, admitted, ready, completed) => codingBridge.resumeBackground(target.room, event, target.session, admitted, ready, completed),
           // A room timer is the bot's own message: no turn, mentions or human origin.
           post: async (target, text, admitted, ready) => {
             if (stopping || !(await privateRoom(target.room, target.sender))) return false;

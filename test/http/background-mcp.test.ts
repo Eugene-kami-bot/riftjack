@@ -131,7 +131,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
   queue = new BackgroundTasks(join(root, 'watches.json'), root);
   writeFileSync(join(root, 'status.json'), '{"stage":"complete"}');
   await queue.pump({ valid: target => state.session(target.key)[kind] === target.session,
-    deliver: (target, message, admitted) => bridge.resumeBackground(target.room, message, target.session, admitted),
+    deliver: (target, message, admitted, ready, completed) => bridge.resumeBackground(target.room, message, target.session, admitted, ready, completed),
     report: error => { throw error; },
   });
   assert.equal(replies.at(-1), 'Observed the saved result.');

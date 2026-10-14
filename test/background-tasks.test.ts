@@ -129,7 +129,7 @@ test('busy delivery remains pending, while reset or revoked access cancels it', 
   assert.equal(JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0].state, 'cancelled');
 });
 
-test('missing or malformed files expire and a crash during delivery is never replayed', async t => {
+test('missing or malformed files expire and an admitted notification is recovered after restart', async t => {
   const f = setup(t); f.queue.action(input, target, signal());
   writeFileSync(join(f.root, 'status.json'), '{partial');
   await f.queue.pump({ valid: () => true, report, deliver: async () => assert.fail('Partial write is not completion') });
@@ -139,8 +139,15 @@ test('missing or malformed files expire and a crash during delivery is never rep
     admit(); recovered = new BackgroundTasks(f.file, f.root);
     return true;
   } }, Date.now() + 25 * 3_600_000);
-  assert.match(recovered!.summary(target.key, target.session), /1 interrupted/);
-  await recovered!.pump({ valid: () => true, report, deliver: async () => assert.fail('Uncertain turn must not replay') });
+  assert.match(recovered!.summary(target.key, target.session), /1 waiting/);
+  let replayed = 0;
+  await recovered!.pump({ valid: () => true, report, deliver: async (_t, message, admit) => {
+    admit(); replayed++;
+    assert.match(message.content!.body!, /Connector recovery after restart/);
+    assert.match(message.content!.body!, /watch_expired/);
+    return true;
+  } });
+  assert.equal(replayed, 1);
 });
 
 test('watch input is scoped, bounded, cancellable, and cannot read outside the workspace', async t => {

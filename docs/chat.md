@@ -83,7 +83,9 @@ changes. A nonexistent local time is skipped; a repeated local time fires only
 at its first occurrence. After downtime, one overdue reminder is delivered and
 the next occurrence is scheduled in the future. The connector persists that next
 occurrence before admitting delivery, so a failed or interrupted run does not
-break the schedule or replay that run. `list` shows the stable schedule ID, next
+lose the next due time. For agent reminders, the interrupted occurrence is
+retained and retried after restart before a new occurrence is admitted. Missed
+schedule intervals are not expanded into a backlog. `list` shows the stable schedule ID, next
 due time and last delivery state; `cancel` stops future occurrences. Resetting
 the conversation or revoking access cancels the schedule.
 
@@ -109,12 +111,25 @@ watch; changing terminal states requires cancelling it first. A bot may have up
 to 100 active watches. Recent completed records are retained with a bounded limit.
 
 A notification starts an ordinary agent turn; it can consume the model's usage
-limit and still needs the usual approvals for protected actions. Delivery is
-attempted once. If the connector crashes after admitting the turn, the watch is
-marked `interrupted` on startup and is not automatically replayed: the agent may
-already have acted. Inspect the conversation and saved results before registering
-another watch. The `delivered` state means the notification turn was admitted and
-finished handling; it does not certify that the underlying task or agent succeeded.
+limit and still needs the usual approvals for protected actions. Agent reminders
+and watch notifications are saved before execution and marked `delivered` only
+after the turn and its response delivery complete successfully. An intentional
+`NO_REPLY` is a successful, silent completion, including in private rooms. This
+confirms handling of the notification, not success of the underlying build or task.
+
+If the backend fails, times out or the connector exits mid-turn, the notification
+is retained for the next connector restart. There is no immediate retry loop.
+Recovery uses the same occurrence ID and observed watch result, even if the
+status file has since changed. A warning tells the agent to inspect existing
+results before repeating actions or requesting new confirmations. Cancellation,
+a reset session, revoked access or a changed workspace prevents recovery.
+
+External actions are not transactional with this checkpoint. A crash after a
+reply or other effect but before recording completion can still cause another
+turn; recovery does not guarantee exactly-once effects. Previously completed
+records are not replayed. Older interrupted records without a saved notification
+remain uncertain and require inspection. Direct `deliver=room` messages keep
+uncertain-send status after an interrupted send and are not automatically resent.
 
 These watches are available to Codex and Claude bots. External workers continue
 to use their existing durable task queue; this tool does not monitor arbitrary

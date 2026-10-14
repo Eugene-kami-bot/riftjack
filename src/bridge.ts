@@ -189,11 +189,11 @@ export class Bridge {
   }
 
   // `ready` is rechecked synchronously right before admission, after the privacy check.
-  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void, ready?: () => boolean): Promise<boolean> {
+  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void, ready?: () => boolean, completed?: (cancelled?: boolean) => void): Promise<boolean> {
     if (this.busy || this.stopped || this.options.isStopping?.()) return false;
-    let accepted = false;
-    await this.handleMessage(room, event, true, { session, ready, admitted: () => { admitted(); accepted = true; } });
-    return accepted;
+    let finished = false;
+    await this.handleMessage(room, event, true, { session, ready, admitted, completed: cancelled => { completed?.(cancelled); finished = true; } });
+    return finished;
   }
 
   async drainQueued(): Promise<void> {
@@ -210,7 +210,7 @@ export class Bridge {
     } finally { this.draining = false; }
   }
 
-  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void; ready?: () => boolean }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
+  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void; ready?: () => boolean; completed?: (cancelled?: boolean) => void }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
     // A watch is lower priority than a human message arriving during its
     // privacy check. It must not reserve the human admission queue.
     if (background) return this.acceptMessage(room, event, feedback, background, fromQueue, batch, () => {});
@@ -222,13 +222,13 @@ export class Bridge {
     finally { admitted(); }
   }
 
-  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void; ready?: () => boolean } | undefined,
+  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void; ready?: () => boolean; completed?: (cancelled?: boolean) => void } | undefined,
     fromQueue: boolean, batch: MatrixEvent[], admitted: () => void): Promise<void> {
     const o = this.options;
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
     const media = isMedia(event.content?.msgtype);
     if (event.type !== 'm.room.message' || (event.content?.msgtype !== 'm.text' && !media) || !event.event_id) return;
-    if (!Number.isFinite(event.origin_server_ts) || (!fromQueue && event.origin_server_ts! < o.since)) return;
+    if (!Number.isFinite(event.origin_server_ts) || (!fromQueue && !background && event.origin_server_ts! < o.since)) return;
     if (event.content?.['m.relates_to']?.rel_type === 'm.replace') return;
     const body = !media && event.content?.['m.relates_to']?.['m.in_reply_to']
       ? event.content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : event.content?.body;
@@ -507,7 +507,8 @@ export class Bridge {
         // answer: the text is dropped, attachments are still sent. Commands
         // always report their result.
         const peerTurn = !!responseEvent.content?.[AGENT_TRIGGER];
-        const quiet = (responseEvent.content?.[NOTICE] === 'restart' || peerTurn || (!command && !!o.shared?.(room))) && (text.trim() === 'NO_REPLY' || (peerTurn && !text.trim()));
+        const quietNotice = ['restart', 'timer', 'background'].includes(responseEvent.content?.[NOTICE] as string);
+        const quiet = (quietNotice || peerTurn || (!command && !!o.shared?.(room))) && (text.trim() === 'NO_REPLY' || (peerTurn && !text.trim()));
         if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
@@ -523,6 +524,9 @@ export class Bridge {
         if (o.recoverMessages) o.state.completeMessages(o.botId, completed);
         for (const id of completed) this.retained.delete(id);
         current.inputIds = current.inputIds.filter(id => !completed.includes(id));
+        // Checkpoint the notification before processing human follow-ups: a
+        // later follow-up failure must not replay an already completed notice.
+        if (responseEvent === event) background?.completed?.();
         next = current.followups.shift();
       }
     } catch (error) {
@@ -541,6 +545,7 @@ export class Bridge {
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
     } finally {
       if (current.cancelled || !o.isAuthorized(current.sender)) {
+        background?.completed?.(true);
         if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
         for (const id of current.inputIds) this.retained.delete(id);
       }
