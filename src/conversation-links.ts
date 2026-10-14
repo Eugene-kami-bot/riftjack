@@ -26,8 +26,9 @@ type History = Record<string, { members: string; messages: Entry[]; next: number
 // message is prepared and consumed once by its recipient. Saved with the
 // history under CREDITS_KEY.
 type Credit = { level: number; since: number };
-type Grant = { from: string; to: string; room: string; level: number; since: number };
-type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant> };
+type WireGrant = { version: 1; id: string; from: string; to: string; room: string; remaining: number; since: number };
+type Grant = { from: string; to: string; room: string; level: number; since: number; wire?: WireGrant };
+type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number> };
 const CREDITS_KEY = '#credits';
 const roomMembers = (room: Room) => [room.owner, ...room.bots, ...(room.observers ?? [])];
 const membershipKey = (room: Room) => JSON.stringify([room.owner, ...roomMembers(room).slice(1).sort()]);
@@ -39,6 +40,7 @@ const matrixRoom = (s: unknown): s is string => typeof s === 'string' && /^![^\s
 // larger of its own reserve and the sender's remainder. A reserve expires a day
 // after the human message it comes from; passing it on does not renew it.
 const CREDIT_TTL_MS = 24 * 3_600_000;
+const validCreditTime = (since: number, now: number) => Number.isSafeInteger(since) && since <= now + 60_000 && now - since < CREDIT_TTL_MS;
 // Longest quoted peer reply included with the turn it starts.
 const QUOTE_LIMIT = 8000;
 
@@ -111,19 +113,20 @@ export class ConversationLinks {
   }
   peerCredit(bot: string, now = Date.now()): number {
     const credit = this.credits.agents[bot];
-    return credit && now - credit.since < CREDIT_TTL_MS ? credit.level : 0;
+    return credit && validCreditTime(credit.since, now) ? credit.level : 0;
   }
   // Spends one credit for a mention of the room's other agent while the message
-  // is being prepared. Returns the grant ID to send with it, or nothing.
-  reserve(bot: string, room: string, now = Date.now()): string | undefined {
+  // is being prepared. Returns the bounded wire grant, or nothing.
+  reserve(bot: string, room: string, now = Date.now()): WireGrant | undefined {
     const shared = this.room(bot, room), peer = shared?.bots.find(id => id !== bot), have = this.peerCredit(bot, now);
     if (!peer || have < 1) return;
     const since = this.credits.agents[bot].since, id = randomUUID();
+    const wire: WireGrant = { version: 1, id, from: bot, to: peer, room, since, remaining: have - 1 };
     this.credits.agents[bot] = { level: have - 1, since };
     this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, g]) => now - g.since < CREDIT_TTL_MS).slice(-99));
-    this.credits.grants[id] = { from: bot, to: peer, room, level: have - 1, since };
+    if (this.agent(peer)) this.credits.grants[id] = { from: bot, to: peer, room, level: have - 1, since, wire };
     this.saveHistory();
-    return id;
+    return wire;
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
@@ -218,16 +221,27 @@ export class ConversationLinks {
     const mentioned = ((log.mentioned ??= {})[bot] ??= []);
     if (mentioned.includes(event.event_id)) return;
     log.mentioned[bot] = [...mentioned, event.event_id].slice(-1000);
-    // Only a mention paid when it was prepared starts the peer, once. The peer
-    // keeps the larger reserve, so a chain of mentions always runs out.
-    const now = Date.now(), id = content[GRANT], grant = typeof id === 'string' ? this.credits.grants[id] : undefined;
-    const allowed = !!grant && grant.from === event.sender && grant.to === bot && grant.room === room && now - grant.since < CREDIT_TTL_MS;
-    if (grant && allowed) {
-      delete this.credits.grants[id as string];
-      // The recipient's reserve plus its own pending grants becomes the larger of
-      // that total and the passed level, never more: it stays within the cap.
+    // A wire grant starts its recipient once, including on a separate installation.
+    const now = Date.now(), wire = content[GRANT] as WireGrant | undefined;
+    const valid = !!wire && typeof wire === 'object' && wire.version === 1 &&
+      typeof wire.id === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(wire.id) &&
+      wire.from === event.sender && wire.to === bot && wire.room === room &&
+      Number.isInteger(wire.remaining) && wire.remaining >= 0 && wire.remaining < PEER_CREDIT &&
+      validCreditTime(wire.since, now);
+    const received = this.credits.received = Object.fromEntries(Object.entries(this.credits.received ?? {})
+      .filter(([, expires]) => expires > now));
+    const receipt = valid ? JSON.stringify([event.sender, room, wire!.id]) : '';
+    const local = this.agent(event.sender), grant = valid ? this.credits.grants[wire!.id] : undefined;
+    // Remote bots are explicitly trusted via the configured shared-room membership.
+    // Local grants still have to match the reservation, including its generation.
+    const allowed = valid && !received[receipt] && Object.keys(received).length < 10000 &&
+      (!local || !!grant?.wire && (Object.keys(grant.wire) as (keyof WireGrant)[]).every(key => grant.wire![key] === wire![key]));
+    if (allowed) {
+      received[receipt] = wire!.since + CREDIT_TTL_MS;
+      if (local) delete this.credits.grants[wire!.id];
       const pending = Object.values(this.credits.grants).filter(g => g.from === bot && now - g.since < CREDIT_TTL_MS).length;
-      if (grant.level - pending > this.peerCredit(bot, now)) this.credits.agents[bot] = { level: grant.level - pending, since: grant.since };
+      const level = (local ? grant!.level : wire!.remaining) - pending;
+      if (level > this.peerCredit(bot, now)) this.credits.agents[bot] = { level, since: wire!.since };
     }
     this.saveHistory();
     if (!allowed) return;
@@ -276,7 +290,7 @@ export class ConversationLinks {
   // A mention is paid here, as the message is sent; without credit left it is
   // sent without the mention.
   outgoing<T extends { msgtype?: string }>(bot: string, room: string, content: T, mentions?: string[], reply?: string):
-    T & { [REPLY]?: string; [GRANT]?: string; 'm.mentions'?: { user_ids: string[] } } {
+    T & { [REPLY]?: string; [GRANT]?: WireGrant; 'm.mentions'?: { user_ids: string[] } } {
     if (!this.room(bot, room)) return content;
     const grant = mentions?.length ? this.reserve(bot, room) : undefined;
     return { ...content, ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),

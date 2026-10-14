@@ -18,7 +18,7 @@ import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reacti
 // Connector-defined content fields. A trigger marks a turn started by a peer
 // agent's mention; it is created locally and never accepted from Matrix.
 // A reply ID is shared by the parts of one split reply.
-// A grant is the ID of the peer credit paid for a mention. A notice marks a
+// A grant carries the peer credit reserved for a mention. A notice marks a
 // locally created turn in the human's approval scope (a background result, a
 // timer or reaction feedback), so it is not presented as the human's words.
 export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant',

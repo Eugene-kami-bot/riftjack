@@ -210,24 +210,35 @@ A received mention starts a separate turn for the mentioned agent:
   avoid answering twice. After a failed earlier turn the notice is unchanged.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Starting the peer costs **peer credit**. Each local agent has a reserve of at
-  most 5. A new human message to that agent, in its private chat or addressed to
-  it in the shared room, restores the reserve to 5; further messages do not add to
-  it. Each mention costs the sender one, and the mentioned agent keeps the larger
-  of its own reserve and the sender's remainder, never the sum. For example, after
-  a message to one agent its reserve is 5; when it mentions its peer, both have 4.
-  An exchange without new human messages therefore always runs out.
-- A reserve expires a day after the human message it comes from; passing it on
-  does not renew it. Only a newly accepted human message restores it: replays,
-  commands and messages refused by access checks do not. The sender pays when the
-  mentioning message is prepared, and the message carries a one-time grant; its
-  recipient is started only by an unused grant addressed to it, so mentions sent
-  ahead cannot spend credit restored later. Restoring the reserve voids the
-  agent's unused grants, and credit passed by the peer raises the reserve only
-  so far that reserve plus pending mentions equals the passed level; together they
-  never exceed the cap. Silent or failed turns count as well.
-  The agent sees its reserve as `peerCredit` in the routing context. A mention
-  without credit is refused with an error to the sender. Only agents of this
-  installation have credit.
+  most 5. A newly accepted human message restores it to 5. Each outgoing mention
+  costs one; the recipient keeps the larger of its own reserve and the sender's
+  remainder, never the sum. For example, sending twice from a reserve of 5 passes
+  4 and then 3. A recipient that already has 5 keeps 5, even when passed zero.
+  There is no per-turn or per-chain credit: all rooms share the agent's reserve.
+- A reserve expires one day after its originating human input; forwarding does
+  not renew it. Hosts should keep their clocks synchronized (one minute of
+  forward skew is tolerated). Replays, commands and refused messages do not
+  restore credit. Silent or failed turns still consume the reserved send.
+- The encrypted event content carries `riftjack.grant`: version, unique grant ID,
+  originating time, remaining credit, sender, recipient and room. Both
+  installations must support this format. Configuring the remote agent in a
+  shared room's `bots` list trusts that installation to issue these grants.
+  The recipient validates the actual Matrix sender, room, destination, bounds
+  and expiry after the normal room-access checks. Arbitrary observers cannot
+  issue grants. This trust permits bounded agent invocation, not human approval.
+- Consumed grant IDs are saved until expiry, so replaying a grant under another
+  event ID does not start another turn, including after restart. The receipt
+  store holds at most 10,000 unexpired grants and refuses further admissions
+  until space expires. For locally delivered mentions, outstanding reservations
+  count towards the recipient's reserve when taking the maximum, as before.
+  Remote reservations are consumed by the recipient's installation.
+- A new human message voids unused local reservations, but cannot retract a
+  grant already sent to another installation. Its original expiry still applies.
+  Old messages containing only a local grant ID cannot wake a peer with the new
+  protocol; ordinary message observations remain available.
+- The routing context supplies the agent's reserve as `peerCredit`. A mention
+  without credit is refused with an error to the sender.
+
 - Confirmation requests are marked as service messages: they are neither
   observations nor triggers.
 
