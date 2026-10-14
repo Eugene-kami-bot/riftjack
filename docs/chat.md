@@ -54,7 +54,7 @@ Inspect the process and logs before retrying work, and register a new watch if
 monitoring should continue. Watches without these options retain the ordinary
 completion/expiry behavior. Notifications still wait for the agent to be idle.
 
-The same tool schedules delayed messages for up to 7 days, for example when you
+The same tool schedules delayed messages for up to 60 days, for example when you
 ask a bot to remind you of something tomorrow:
 
 ```json
@@ -69,7 +69,8 @@ restarts, are listed with `action: "list"`, and can be cancelled before they are
 due. The confirmation and the list show the room and the exact text. A busy bot
 delivers an agent reminder after its current task. A timer delivered more than a
 minute late, for example after the connector was stopped, says when it was due and
-how late it is. A crash during delivery is never replayed.
+how late it is. After a crash, interrupted agent reminders are retried on restart with a warning
+to check previous effects. Uncertain direct room posts are not replayed automatically.
 
 For a recurring reminder, use `schedule` instead of `at` or `delay_minutes`:
 

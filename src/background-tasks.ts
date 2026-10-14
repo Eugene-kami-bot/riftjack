@@ -16,7 +16,8 @@ type Watch = BackgroundTarget & { id: string; label: string; file: string; field
   stale?: { minutes: number; updated: number };
   timer?: { message: string; deliver: 'agent' | 'room'; schedule?: ReminderSchedule;
     lastRun?: { due: number; state: 'dispatching' | 'delivered' | 'interrupted' | 'cancelled' } } };
-const MAX_DELAY_MINUTES = 7 * 24 * 60;
+export const MAX_REMINDER_MINUTES = 60 * 24 * 60;
+const MAX_STALE_MINUTES = 7 * 24 * 60;
 const validPid = (pid: unknown): pid is number => Number.isInteger(pid) && (pid as number) > 0 && (pid as number) <= 2_147_483_647;
 // Signal 0 checks existence without sending a signal. EPERM and other errors
 // are inconclusive; only ESRCH establishes that this PID no longer exists.
@@ -49,7 +50,7 @@ export class BackgroundTasks {
         !Number.isFinite(w.delivery.time) || !Number.isSafeInteger(w.delivery.attempts) || (w.delivery.attempts as number) < 1 ||
         (record(w.timer) && w.timer.deliver === 'room'))) ||
       (w.pid !== undefined && (w.timer !== undefined || !validPid(w.pid))) ||
-      (w.stale !== undefined && (w.timer !== undefined || !record(w.stale) || !Number.isInteger(w.stale.minutes) || (w.stale.minutes as number) < 1 || (w.stale.minutes as number) > MAX_DELAY_MINUTES || !Number.isFinite(w.stale.updated))) ||
+      (w.stale !== undefined && (w.timer !== undefined || !record(w.stale) || !Number.isInteger(w.stale.minutes) || (w.stale.minutes as number) < 1 || (w.stale.minutes as number) > MAX_STALE_MINUTES || !Number.isFinite(w.stale.updated))) ||
       !['waiting', 'dispatching', 'delivered', 'cancelled', 'interrupted'].includes(w.state as string))) {
       throw new Error('Invalid background task state. Restore it before restarting.');
     }
@@ -105,9 +106,9 @@ export class BackgroundTasks {
       if (Object.keys(input).some(k => !['action', 'label', 'message', 'deliver', 'at', 'delay_minutes', 'schedule'].includes(k)) ||
         !short(input.label) || !timerMessage(input.message) || !['agent', 'room'].includes(input.deliver as string) ||
         (recurring ? !validSchedule(schedule) || input.at !== undefined || delay !== undefined : (input.at === undefined) === (delay === undefined)) ||
-        (delay !== undefined && (!Number.isInteger(delay) || (delay as number) < 1 || (delay as number) > MAX_DELAY_MINUTES)) ||
-        !Number.isFinite(due) || due <= Date.now() || (!recurring && due > Date.now() + MAX_DELAY_MINUTES * 60_000)) {
-        throw new PublicError('Use remind with label, message (up to 4000 characters), deliver (agent or room), and either delay_minutes (1–10080), at (ISO 8601 time with offset, within 7 days), or schedule (daily/weekly, HH:MM time, IANA timezone; weekly also needs weekday 1–7, Monday–Sunday).');
+        (delay !== undefined && (!Number.isInteger(delay) || (delay as number) < 1 || (delay as number) > MAX_REMINDER_MINUTES)) ||
+        !Number.isFinite(due) || due <= Date.now() || (!recurring && due > Date.now() + MAX_REMINDER_MINUTES * 60_000)) {
+        throw new PublicError('Use remind with label, message (up to 4000 characters), deliver (agent or room), and either delay_minutes (1–86400), at (ISO 8601 time with offset, within 60 days), or schedule (daily/weekly, HH:MM time, IANA timezone; weekly also needs weekday 1–7, Monday–Sunday).');
       }
       if (this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
       this.prune();
@@ -131,7 +132,7 @@ export class BackgroundTasks {
       !short(input.label) || !short(input.status_file, 4096) || !short(input.field, 80) ||
       !Array.isArray(input.terminal) || !input.terminal.length || input.terminal.length > 16 || !input.terminal.every(x => short(x, 80)) ||
       (input.pid !== undefined && !validPid(input.pid)) ||
-      (input.stale_after_minutes !== undefined && (!Number.isInteger(input.stale_after_minutes) || (input.stale_after_minutes as number) < 1 || (input.stale_after_minutes as number) > MAX_DELAY_MINUTES)) ||
+      (input.stale_after_minutes !== undefined && (!Number.isInteger(input.stale_after_minutes) || (input.stale_after_minutes as number) < 1 || (input.stale_after_minutes as number) > MAX_STALE_MINUTES)) ||
       (input.timeout_hours !== undefined && (!Number.isInteger(input.timeout_hours) || (input.timeout_hours as number) < 1 || (input.timeout_hours as number) > 168))) {
       throw new PublicError('Use watch with label, status_file, field, terminal string values and optional timeout_hours (1–168), stale_after_minutes (1–10080), and pid (positive process ID on this host).');
     }

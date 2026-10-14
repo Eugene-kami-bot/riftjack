@@ -255,7 +255,7 @@ test('timers wait until due, survive restart and deliver once as a reminder or a
 test('timer input is bounded and cancellable, and a late timer arrives with its delay', async t => {
   const f = setup(t);
   const base = { action: 'remind', label: 'Later', message: 'Hello', deliver: 'room' };
-  for (const bad of [{ ...base }, { ...base, delay_minutes: 0 }, { ...base, delay_minutes: 10081 }, { ...base, delay_minutes: 5, at: new Date().toISOString() },
+  for (const bad of [{ ...base }, { ...base, delay_minutes: 0 }, { ...base, delay_minutes: 86401 }, { ...base, delay_minutes: 5, at: new Date().toISOString() },
     { ...base, at: '2026-10-04 10:00' }, { ...base, at: new Date(Date.now() - 60_000).toISOString() }, { ...base, deliver: 'everyone', delay_minutes: 5 },
     { ...base, message: '', delay_minutes: 5 }, { ...base, delay_minutes: 5, extra: true }]) {
     assert.throws(() => f.queue.action(bad, target, signal()), /Use remind/);
@@ -273,6 +273,30 @@ test('timer input is bounded and cancellable, and a late timer arrives with its 
     post: async (_t, text, admit) => { admit(); late.push(text); return true; } }, Date.now() + 65 * 60_000);
   assert.match(late[0], /^Hello\n\n\(Scheduled for .*; delivered 6\d minutes late\.\)$/);
   assert.match(f.queue.summary(target.key, target.session), /0 timers pending/);
+});
+
+test('sixty-day reminders survive restart and retain their due time', async t => {
+  const f = setup(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 0, 1) });
+  const due = Date.now() + 60 * 86_400_000;
+  const base = { action: 'remind', label: 'Release check', message: 'Check the release.', deliver: 'room' };
+  const delayed = JSON.parse(f.queue.action({ ...base, delay_minutes: 86400 }, target, signal()));
+  const dated = JSON.parse(f.queue.action({ ...base, at: new Date(due).toISOString() }, target, signal()));
+  assert.equal(Date.parse(delayed.due), due);
+  assert.equal(dated.due, delayed.due);
+  assert.throws(() => f.queue.action({ ...base, at: new Date(due + 1).toISOString() }, target, signal()), /Use remind/);
+  assert.throws(() => f.queue.action({ ...input, stale_after_minutes: 10081 }, target, signal()), /Use watch/);
+  assert.throws(() => f.queue.action({ ...input, timeout_hours: 169 }, target, signal()), /Use watch/);
+  const queue = new BackgroundTasks(f.file, f.root);
+  const sent: string[] = [];
+  const delivery = { valid: () => true, report, deliver: async () => false,
+    post: async (_target: BackgroundTarget, text: string, admit: () => void) => { admit(); sent.push(text); return true; } };
+  await queue.pump(delivery, due - 1);
+  assert.deepEqual(sent, []);
+  await queue.pump(delivery, due);
+  assert.deepEqual(sent, [base.message, base.message]);
+  const saved = JSON.parse(new BackgroundTasks(f.file, f.root).action({ action: 'list' }, target, signal()));
+  assert.deepEqual(saved.map((w: { state: string }) => w.state), ['delivered', 'delivered']);
 });
 
 test('finished timers are pruned so the saved state always loads again', async t => {

@@ -40,8 +40,9 @@ test('background MCP advertises and schedules delayed messages', async t => {
   assert.ok(tools.result.tools[0].inputSchema.properties.action.enum.includes('remind'));
   assert.equal(tools.result.tools[0].inputSchema.properties.pid.minimum, 1);
   assert.equal(tools.result.tools[0].inputSchema.properties.stale_after_minutes.maximum, 10080);
+  assert.equal(tools.result.tools[0].inputSchema.properties.delay_minutes.maximum, 86400);
   const scheduled = JSON.parse((await call(2, 'tools/call', { name: 'background_tasks',
-    arguments: { action: 'remind', label: 'Later', message: 'Check the build.', deliver: 'room', delay_minutes: 30 } })).result.content[0].text);
+    arguments: { action: 'remind', label: 'Later', message: 'Check the build.', deliver: 'room', delay_minutes: 86400 } })).result.content[0].text);
   assert.deepEqual([scheduled.room, scheduled.message, scheduled.state], ['!room:test', 'Check the build.', 'waiting']);
   const listed = JSON.parse((await call(3, 'tools/call', { name: 'background_tasks', arguments: { action: 'list' } })).result.content[0].text);
   assert.deepEqual(listed.map((w: { id: string; kind: string }) => [w.id, w.kind]), [[scheduled.id, 'timer']]);
