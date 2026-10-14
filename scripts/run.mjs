@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const [entry, ...rest] = process.argv.slice(2);
-if (entry !== 'supervisor' && entry !== 'main') throw new Error('Usage: node scripts/run.mjs supervisor|main [arguments]');
+if (!['supervisor', 'main', 'executor-main'].includes(entry)) throw new Error('Usage: node scripts/run.mjs supervisor|main|executor-main [arguments]');
 const home = realpathSync(process.env.RIFTJACK_HOME || process.env.INIT_CWD || process.cwd());
 const code = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 if (home === code || !existsSync(join(home, '.env'))) {
@@ -15,7 +15,7 @@ if (home === code || !existsSync(join(home, '.env'))) {
   process.exit(78);
 }
 // The supervisor never reads .env itself: each connector it starts loads the current file.
-const args = [...(entry === 'main' ? ['--env-file-if-exists=.env'] : []), '--import', fileURLToPath(import.meta.resolve('tsx')),
+const args = [...(entry !== 'supervisor' ? ['--env-file-if-exists=.env'] : []), '--import', fileURLToPath(import.meta.resolve('tsx')),
   fileURLToPath(new URL(`../src/${entry}.ts`, import.meta.url)), ...rest];
 const child = entry === 'supervisor'
   ? spawn('sh', [join(code, 'scripts/start-connector.sh'), '--foreground'],

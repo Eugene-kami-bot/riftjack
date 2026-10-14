@@ -4,6 +4,8 @@
 
 Give your agents an address you can message. Riftjack connects Codex and Claude Code on your computer to encrypted Matrix conversations. Send a task, share a file, follow the work, and answer approval requests from your phone or desktop. These agents work in your local project directories. [Grok and other external workers](docs/grok.md) can also receive tasks and send replies through Riftjack, using a durable inbox instead of their own Matrix client.
 
+For a remote host without a model, the [command executor](docs/executor.md) accepts explicitly addressed jobs from an encrypted shared room and reports live output, status and logs. It needs no model account or inbound network port.
+
 Keep a conversation open for each project. Come back with a question, a correction, or the next idea.
 
 ## A conversation with your workspace

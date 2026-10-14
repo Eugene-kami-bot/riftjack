@@ -56,6 +56,10 @@ node --import tsx scripts/benchmark-media.mts buffered /absolute/path/test.bin /
 
 Each command runs a separate Node process with a loopback HTTP receiver and verifies the received ciphertext hash. The report records elapsed time and kernel peak RSS, including the receiver. `buffered` reproduces the former whole-file encryption and SDK upload for comparison. These measurements do not include a Matrix homeserver or recipient download. Benchmark inputs and result files are local data; keep them outside the checkout.
 
+## Model-free executor checks
+
+`test/executor.test.ts` uses real short-lived child processes and mocked Matrix delivery. It checks admission, owner-selected policy, serial execution, cancellation, timeout, output limits, durable launch ordering, restart uncertainty and reuse of encrypted reply transactions. Companion conversation/background tests check request correlation, progress intervals, coalescing, and recovery of failed Codex/Claude notification turns. These checks open no listening ports and run in the ordinary suite. Run it sequentially; do not exercise sudo on the development host. See [executor setup](executor.md) for live encrypted-room and ARM64 smoke checks still required on deployment.
+
 ## Routing context
 
 Stable Matrix routing rules live in `routing-instructions.ts`. Codex receives them

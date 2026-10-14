@@ -203,3 +203,36 @@ test('recovered notifications survive a new bridge with a later startup time', a
   assert.equal(calls, 1);
   assert.equal(f.saved().state, 'delivered');
 });
+
+for (const kind of ['codex', 'claude'] as const) test(`${kind}: executor wake is durable, deduplicated and recovers after a failed turn`, async t => {
+  const f = setup(t, kind), notification = { group: 'executor:job', progress: false };
+  f.queue.notify('executor:result', target, 'Remote job finished. Inspect its log.', notification);
+  f.queue.notify('executor:result', target, 'Duplicate', notification);
+  await f.queue.pump(f.options);
+  assert.equal(f.prompts.length, 1); assert.match(f.prompts[0], /Remote job finished/);
+  assert.doesNotMatch(f.prompts[0], /A reminder you scheduled/);
+  assert.equal(f.saved().state, 'interrupted');
+  f.succeed();
+  const recovered = new BackgroundTasks(f.file, f.root);
+  recovered.notify('executor:result', target, 'Duplicate after restart', notification);
+  await recovered.pump(f.options);
+  assert.equal(f.prompts.length, 2); assert.match(f.prompts[1], /Connector recovery/);
+  assert.equal(f.saved().state, 'delivered');
+  await recovered.pump(f.options); assert.equal(f.prompts.length, 2);
+});
+
+test('executor progress coalesces while busy and completion supersedes pending updates', async t => {
+  const f = setup(t); f.succeed();
+  const group = 'executor:job';
+  f.queue.notify('p1', target, 'First progress', { group, progress: true });
+  await f.queue.pump({ ...f.options, deliver: async () => false });
+  f.queue.notify('p2', target, 'Latest progress', { group, progress: true });
+  f.queue.notify('p1', target, 'Duplicate old progress', { group, progress: true });
+  await f.queue.pump(f.options);
+  assert.equal(f.prompts.length, 1); assert.match(f.prompts[0], /Latest progress/);
+  f.queue.notify('p3', target, 'Pending progress', { group, progress: true });
+  f.queue.notify('done', target, 'Completed', { group, progress: false });
+  const recovered = new BackgroundTasks(f.file, f.root);
+  await recovered.pump(f.options);
+  assert.equal(f.prompts.length, 2); assert.match(f.prompts[1], /Completed/);
+});

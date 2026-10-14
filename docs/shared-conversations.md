@@ -103,7 +103,18 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
 Create the shared Matrix room with encryption, invite-only access and history
 visibility **joined**, then invite the owner and the two bots. Restart the
 connector. Shared-room processing requires all three participants to have joined
-and no extra joined, invited or knocking participant.
+and no extra joined, invited or knocking participant. An optional `observers` array
+on a room lists additional exact Matrix IDs, such as a command executor and its
+host owner. These participants must also have joined. Their text and attachments
+are available as observations, but they cannot control the agents, provide
+approvals or obtain peer credit. Generic observers cannot start turns by mentioning agents.
+An optional `executors` subset of `observers` enables correlated job-result
+notifications from the [model-free command executor](executor.md), including
+explicitly requested progress wakes. Only the agent that sent the recorded job
+request is resumed; raw log text is not treated as a request. Adding observers
+changes the membership boundary and resets that room's observation history.
+Configure the list locally before inviting them; an unlisted participant still
+blocks room processing.
 
 The initial connector owner controls these links. Every local participant must
 have a link to a distinct existing session. A missing or different session causes

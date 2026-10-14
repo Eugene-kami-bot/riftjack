@@ -885,3 +885,67 @@ test('an agent may decline a shared-room human message with NO_REPLY, but not a 
   await withFile.handle(group, message('Send the file', '$file'));
   assert.deepEqual(sent, ['attachment']);
 });
+
+test('configured observers share text and attachments but never gain controller or peer authority', async t => {
+  const f = fixture(t), observer = '@executor:test';
+  (f.config.rooms[0] as any).observers = [observer];
+  writeFileSync(f.path, JSON.stringify(f.config));
+  const links = f.load();
+  const observation = message('job: succeeded', '$executor-result', observer);
+  assert.equal(links.observe(bot, group, observation), true);
+  observation.content!['m.mentions'] = { user_ids: [bot] };
+  assert.equal(links.mention(bot, group, observation), undefined);
+  assert.throws(() => links.key(bot, group, observation));
+  const prompt = JSON.parse(links.prompt(bot, group, message('Inspect the result'), 'Inspect the result').split('\n')[1]);
+  assert.ok(prompt.participants.includes(observer));
+  assert.equal(prompt.unreadSharedMessages[0].role, 'participant');
+  assert.equal(prompt.unreadSharedMessages[0].body, 'job: succeeded');
+  const action = linkedRoomMessages(links, bot, { event: message('Read log'), key: canonical }, {
+    allowed: async () => true, stopping: () => false, send: async () => assert.fail('No send'),
+    read: async () => ({ ...observation, content: { msgtype: 'm.file', body: 'output.log', file: { url: 'mxc://test/log' } as any } }),
+    receive: async (_e, _key, _signal, authorize) => { await authorize(); return { path: '/local/output.log', name: 'output.log', size: 4, image: false, mimetype: 'text/plain' }; },
+  });
+  const received = JSON.parse(await action({ action: 'receive_attachment', room: group, event_id: '$executor-result' }, new AbortController().signal));
+  assert.equal(received.status, 'received');
+  (f.config.rooms[0] as any).observers = [human]; writeFileSync(f.path, JSON.stringify(f.config));
+  assert.throws(() => f.load(), /shared room/);
+});
+
+test('executor notifications require configured sender, own persisted request, job match and opt-in progress', async t => {
+  const f = fixture(t), executor = '@executor:test';
+  Object.assign(f.config.rooms[0], { observers: [executor, '@observer:test'], executors: [executor] });
+  writeFileSync(f.path, JSON.stringify(f.config));
+  let links = f.load();
+  const action = linkedRoomMessages(links, bot, { event: message('Run'), key: canonical }, {
+    allowed: async () => true, stopping: () => false, send: async () => '$request',
+  });
+  await action({ action: 'send', id: 'job', room: group, text: `!exec ${executor} {"action":"run","id":"job","wakeIntervalSeconds":60}` }, new AbortController().signal);
+  links.prompt(bot, group, message('Next'), 'Next'); links.acknowledge(bot);
+  links = f.load(); // Correlation survives consumed history and restart, without sync echo.
+  const result: MatrixEvent = { ...message('Finished', '$result', executor), content: {
+    msgtype: 'm.text', body: 'Finished', 'm.mentions': { user_ids: [bot] },
+    'riftjack.executor_result': { jobId: 'job', reason: 'completed', request: '$request' },
+  } };
+  assert.match(links.executorResult(bot, group, result)!.body, /untrusted task output/);
+  assert.equal(links.executorResult(peer, group, result), undefined);
+  for (const reason of ['uncertain', 'progress']) {
+    const e = structuredClone(result); e.content!['riftjack.executor_result']!.reason = reason;
+    assert.ok(links.executorResult(bot, group, e));
+  }
+  const invalid: MatrixEvent[] = [
+    { ...result, sender: '@observer:test' }, { ...result, type: 'm.room.encrypted' },
+    { ...result, content: { ...result.content, 'm.mentions': {} } },
+    { ...result, content: { ...result.content, 'm.relates_to': { rel_type: 'm.replace' } } },
+  ];
+  for (const patch of [{ jobId: 'other' }, { request: '$missing' }, { reason: 'response' }]) {
+    invalid.push({ ...result, content: { ...result.content, 'riftjack.executor_result': { ...result.content!['riftjack.executor_result'], ...patch } } });
+  }
+  for (const e of invalid) assert.equal(links.executorResult(bot, group, e), undefined);
+  links.observe(bot, group, message(`!exec ${executor} {"action":"run","id":"quiet"}`, '$quiet', bot));
+  const quiet = structuredClone(result); quiet.content!['riftjack.executor_result'] = { jobId: 'quiet', request: '$quiet', reason: 'progress' };
+  assert.equal(links.executorResult(bot, group, quiet), undefined);
+  result.content!.body = '\u0001'.repeat(2000);
+  assert.ok(links.executorResult(bot, group, result)!.body.length <= 4000);
+  (f.config.rooms[0] as any).executors = [peer]; writeFileSync(f.path, JSON.stringify(f.config));
+  assert.throws(f.load, /configured observers/);
+});

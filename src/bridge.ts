@@ -28,6 +28,7 @@ export const RESTART_PROMPT = 'Riftjack restarted. Check current work and backgr
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
+    'riftjack.executor_result'?: { jobId?: string; reason?: string; request?: string };
     [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown; [NOTICE]?: Notice };
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };

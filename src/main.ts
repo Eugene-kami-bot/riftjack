@@ -429,9 +429,17 @@ async function main() {
       if (shared) {
         if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return false;
         links.observe(account.userId, room, event);
+        const result = background && links.executorResult(account.userId, room, event);
+        if (result && linkedAgent) {
+          const targetEvent: MatrixEvent = { sender: shared.owner, content: { msgtype: 'm.text' } };
+          background!.notify('executor:' + createHash('sha256').update(result.id + account.userId).digest('hex'), {
+            room, sender: shared.owner, key: links.key(account.userId, room, targetEvent), session: linkedAgent.session,
+            ...(event.content?.['m.relates_to']?.event_id && { thread: event.content['m.relates_to'].event_id }),
+          }, result.body, { group: result.group, progress: result.progress });
+        }
         // Other agents are heard as context, never impersonated as the controller.
-        // Only an explicit mention paid with peer credit starts a separate connector
-        // notice turn; each agent evaluates it once, whichever bot recorded it first.
+        // Peer mentions paid with credit start a separate connector
+        // notice turn, once per recipient. Executor results use the durable inbox above.
         if (event.sender !== shared.owner) {
           const mention = links.mention(account.userId, room, event);
           if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
@@ -453,14 +461,15 @@ async function main() {
     const inbox = (room: string, event: MatrixEvent) => {
       // Capture before the first await, including before room routing checks.
       if (bridge instanceof Bridge) bridge.capture(room, event);
-      incoming = incoming.then(() => prepareIncoming(room, event)).catch(diagnostics);
+      incoming = incoming.catch(() => {}).then(() => prepareIncoming(room, event));
+      return incoming;
     };
     if (client instanceof MessageMatrixClient) {
-      client.inbox = async (room, event) => { inbox(room, event); };
+      client.inbox = async (room, event) => { await inbox(room, event); };
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
-    } else if (account.kind !== 'grok') client.on('room.message', inbox);
+    } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(diagnostics); });
     client.on('room.event', (room: string, event: MatrixEvent) => {
-      if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') inbox(room, event);
+      if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') void inbox(room, event).catch(diagnostics);
     });
     client.on('room.invite', (room: string, event: MatrixEvent) => {
       if (event.sender && authorized(event.sender)) void client.joinRoom(room).catch(diagnostics);

@@ -18,7 +18,8 @@
     "hooks:install": "node scripts/install-git-hooks.mjs",
     "bootstrap:grok": "node scripts/run.mjs main --bootstrap-grok",
     "test:http": "node --import tsx --test test/http/*.test.ts",
-    "test:all": "npm test && npm run test:http"
+    "test:all": "npm test && npm run test:http",
+    "start:executor": "node scripts/run.mjs executor-main"
   },
   "dependencies": {
     "@matrix-org/matrix-sdk-crypto-nodejs": "0.6.6",
