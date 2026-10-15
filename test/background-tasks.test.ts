@@ -24,6 +24,97 @@ function setup(t: { after(fn: () => void): void }) {
 }
 const report = (error: unknown) => { throw error; };
 
+test('task overview is read-only and isolates delivery scopes even with a shared session key', t => {
+  const f = setup(t);
+  assert.match(f.queue.overview(target), /No background/);
+  const reminder = { action: 'remind', label: 'Visible reminder', message: 'Do not expose this reminder body', deliver: 'agent', delay_minutes: 5 };
+  const saved = JSON.parse(f.queue.action(reminder, target, signal()));
+  f.queue.action(input, target, signal());
+  for (const scope of [{ room: '!private:test' }, { sender: '@other:test' }, { thread: '$other' },
+    { thread: undefined }, { session: 'other-session' }, { key: 'other-key' }]) {
+    f.queue.action({ ...reminder, label: 'Hidden reminder' }, { ...target, ...scope }, signal());
+  }
+  const before = readFileSync(f.file, 'utf8');
+  const text = f.queue.overview(target);
+  assert.match(text, /2 of 2/); assert.ok(text.includes(saved.id)); assert.ok(text.includes(saved.due));
+  assert.match(text, /Visible reminder \(reminder; waiting\)/); assert.match(text, /Example build \(watch; waiting\)/);
+  for (const secret of ['Hidden reminder', reminder.message, 'status.json', 'do not forward private data']) assert.ok(!text.includes(secret));
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+  assert.match(new BackgroundTasks(f.file, f.root).overview(target), /2 of 2/);
+  assert.match(f.queue.overview({ ...target, session: undefined }), /No background/);
+});
+
+test('task overview displays persisted recurrence rules without mutating state or exposing reminder text', t => {
+  const f = setup(t);
+  const schedules = [
+    { frequency: 'daily', time: '09:00', timezone: 'America/New_York' },
+    { frequency: 'weekly', time: '18:30', timezone: 'Europe/Berlin', weekday: 7 },
+  ];
+  for (const schedule of schedules) f.queue.action({ action: 'remind', label: schedule.frequency,
+    message: 'Private recurring reminder', deliver: 'agent', schedule }, target, signal());
+  f.queue.action({ action: 'remind', label: 'One-time', message: 'Private one-time reminder', deliver: 'room', delay_minutes: 5 }, target, signal());
+  const before = readFileSync(f.file, 'utf8');
+  const text = new BackgroundTasks(f.file, f.root).overview(target);
+  assert.match(text, /Schedule: daily, 09:00 \(America\/New_York\)/);
+  assert.match(text, /Schedule: weekly, 18:30 \(Europe\/Berlin\), Sunday/);
+  assert.equal((text.match(/Schedule:/g) ?? []).length, 2);
+  assert.doesNotMatch(text, /Private recurring|Private one-time/);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+});
+
+test('task overview shows observed results and recurring delivery uncertainty without replaying work', async t => {
+  const f = setup(t);
+  f.queue.action(input, target, signal()); f.status('failed');
+  await f.queue.pump({ valid: () => true, report, deliver: async (_target, _event, admit) => { admit(); return true; } });
+  const reminder = JSON.parse(f.queue.action({ action: 'remind', label: 'Daily check', message: 'Check', deliver: 'room',
+    schedule: { frequency: 'daily', time: '09:00', timezone: 'UTC' } }, target, signal()));
+  await f.queue.pump({ valid: () => true, report: () => {}, deliver: async () => false,
+    post: async (_target, _message, admit) => { admit(); throw new Error('Uncertain delivery'); } }, Date.parse(reminder.due));
+  const text = new BackgroundTasks(f.file, f.root).overview(target);
+  assert.match(text, /Observed status: failed/);
+  assert.match(text, /Example build \(watch; delivered\)/);
+  assert.match(text, /Daily check \(recurring reminder; waiting\)/);
+  assert.match(text, /Last delivery: interrupted/);
+  assert.ok(text.indexOf('Daily check') < text.indexOf('Example build'));
+  assert.match(text, /not proof of task success/);
+});
+
+test('task overview limits output and prioritizes active over newest completed registrations', t => {
+  const f = setup(t);
+  const reminder = { action: 'remind', message: 'Check', deliver: 'agent', delay_minutes: 5 };
+  f.queue.action({ ...reminder, label: 'Active oldest' }, target, signal());
+  for (let i = 0; i < 25; i++) {
+    const saved = JSON.parse(f.queue.action({ ...reminder, label: 'Completed ' + i }, target, signal()));
+    f.queue.action({ action: 'cancel', id: saved.id }, target, signal());
+  }
+  const text = f.queue.overview(target);
+  assert.match(text, /20 of 26/); assert.match(text, /Active oldest/);
+  assert.ok(text.indexOf('Active oldest') < text.indexOf('Completed 24'));
+  assert.ok(!text.includes('Completed 0 ('));
+  assert.equal(text.split('ID: ').length - 1, 20);
+});
+
+test('task overview keeps interrupted retained deliveries ahead of newer cancelled registrations', async t => {
+  const f = setup(t);
+  const reminder = { action: 'remind', message: 'Private reminder body', deliver: 'agent', delay_minutes: 5 };
+  const pending = JSON.parse(f.queue.action({ ...reminder, label: 'Pending recovery' }, target, signal()));
+  await f.queue.pump({ valid: () => true, report: () => {},
+    deliver: async (_target, _event, admit) => { admit(); throw new Error('Backend failed'); } }, Date.parse(pending.due));
+  const interrupted = JSON.parse(f.queue.action({ action: 'list' }, target, signal())).find((w: { id: string }) => w.id === pending.id);
+  assert.equal(interrupted.state, 'interrupted');
+  for (let i = 0; i < 20; i++) {
+    const saved = JSON.parse(f.queue.action({ ...reminder, label: 'Cancelled ' + i }, target, signal()));
+    f.queue.action({ action: 'cancel', id: saved.id }, target, signal());
+  }
+  const before = readFileSync(f.file, 'utf8');
+  const text = f.queue.overview(target);
+  assert.match(text, /20 of 21/);
+  assert.ok(text.includes(pending.id));
+  assert.ok(text.indexOf('Pending recovery') < text.indexOf('Cancelled 19'));
+  assert.doesNotMatch(text, /Private reminder body/);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+});
+
 test('recurring reminders survive downtime and restart without replaying or catching up missed runs', async t => {
   const f = setup(t);
   const input = { action: 'remind', label: 'Daily', message: 'Check project updates.', deliver: 'agent',

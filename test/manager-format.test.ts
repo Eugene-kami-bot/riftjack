@@ -41,7 +41,7 @@ for (const kind of ['codex', 'claude'] as const) test(kind + ' help renders list
   assert.match(html, /<h3>Basic commands<\/h3>/);
   assert.match(html, /<ul>/);
   assert.match(html, /<blockquote>/);
-  for (const command of ['!help', '!reset', '!cancel', '!approve', '!deny', '!usage', '!restart supervisor']) {
+  for (const command of ['!help', '!reset', '!cancel', '!approve', '!deny', '!usage', '!restart supervisor', '!tasks']) {
     assert.ok(html.includes(`<code>${command}</code>`));
     assert.ok(plain.includes(command));
   }

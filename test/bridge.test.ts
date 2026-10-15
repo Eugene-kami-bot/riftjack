@@ -791,6 +791,38 @@ for (const kind of ['codex', 'claude'] as const) test(`!status (${kind}) is loca
   assert.match(f.replies.at(-1)!, /Task:.*Idle/);
 });
 
+for (const kind of ['codex', 'claude'] as const) test(`!tasks (${kind}) is local, scoped and available during a task`, async t => {
+  const started = gate(), finish = gate(), scopes: unknown[] = [];
+  let runs = 0, steers = 0;
+  const f = fixture(t, kind, async () => { runs++; started.release(); await finish.promise; return 'done'; }, true, {
+    tasks: (room, event, key) => { scopes.push([room, event.sender, key]); return 'Local task overview'; },
+    steer: async () => { steers++; return true; },
+  });
+  await f.bridge.handle('!dm:test', event('!tasks', '$idle-tasks'));
+  assert.equal(runs, 0); assert.equal(f.replies.at(-1), 'Local task overview');
+  const task = f.bridge.handle('!dm:test', event('Work', '$work-tasks')); await started.promise;
+  try {
+    const threaded = { ...event('!tasks', '$thread-tasks'), content: { msgtype: 'm.text', body: '!tasks',
+      'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } };
+    await f.bridge.handle('!dm:test', threaded);
+    assert.deepEqual(scopes.at(-1), ['!dm:test', threaded.sender, sessionKey('!dm:test', threaded)]);
+    const count = scopes.length;
+    await f.bridge.handle('!dm:test', threaded);
+    await f.bridge.handle('!dm:test', event('!tasks extra', '$invalid-tasks'));
+    await f.bridge.handle('!dm:test', { ...event('!tasks', '$foreign-tasks'), sender: '@stranger:test' });
+    assert.equal(scopes.length, count); assert.equal(runs, 1); assert.equal(steers, 0);
+  } finally { finish.release(); await task; }
+});
+
+test('!tasks respects room privacy and unsupported bots', async t => {
+  let reads = 0;
+  const f = fixture(t, 'codex', undefined, false, { tasks: () => { reads++; return 'private'; } });
+  await f.bridge.handle('!dm:test', event('!tasks'));
+  assert.equal(reads, 0); assert.deepEqual(f.replies, []);
+  const manager = fixture(t, 'manager'); await manager.bridge.handle('!dm:test', event('!tasks'));
+  assert.match(manager.replies.at(-1)!, /not available/); assert.deepEqual(manager.calls, []);
+});
+
 test('!status respects room privacy and unsupported bots', async t => {
   let reads = 0;
   const f = fixture(t, 'codex', undefined, false, { status: () => { reads++; return 'private'; } });

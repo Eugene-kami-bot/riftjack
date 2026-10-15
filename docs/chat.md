@@ -107,6 +107,17 @@ it can be observed. A watch expires after 24 hours by default (configurable from
 Use `{"action":"list"}` to inspect this conversation's watches, or
 `{"action":"cancel","id":"WATCH_ID"}` to cancel one. Cancellation stops watching,
 not the background process. `!status` shows waiting and interrupted counts.
+Use `!tasks` for a local, read-only overview without a model request, including
+while the agent is busy. It shows up to 20 registrations from the current room,
+sender, thread and agent session: active entries first, newest registrations first
+within each group. Labels, IDs, delivery states and UTC due/expiry times are shown;
+recurring reminders include their frequency, local time, IANA timezone, weekday
+for weekly schedules and last delivery, and finished watches include
+their observed status. Reminder text and status-file contents are not exposed.
+Linked sessions do not expose another room's registrations through this command.
+Recent finished records may have been pruned; this is not a complete execution
+history or proof that a monitored process succeeded. It does not read status
+files, launch work, cancel registrations or stop processes.
 Repeated registration of the same pending file and field returns the existing
 watch; changing terminal states requires cancelling it first. A bot may have up
 to 100 active watches. Recent completed records are retained with a bounded limit.

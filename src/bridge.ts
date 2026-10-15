@@ -56,6 +56,7 @@ type Options = {
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
+  tasks?: (room: string, event: MatrixEvent, key: string) => string;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -245,7 +246,7 @@ export class Bridge {
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
-    const verb = publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status)$/.exec(prompt)?.[1]) || o.kind;
+    const verb = publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status|tasks)$/.exec(prompt)?.[1]) || o.kind;
     // All local bots share State. Claim this connector-wide command once,
     // after authorization but before even the stopping/busy reply. Persisting
     // the claim also silences delayed copies received after the restart.
@@ -311,6 +312,10 @@ export class Bridge {
       }
     }
     if (verb === 'help') { await this.reply(room, event, help(o.kind), true); return; }
+    if (verb === 'tasks') {
+      await reply(o.tasks ? o.tasks(room, event, backendKey) : '!tasks is not available for this bot.');
+      return;
+    }
     if (verb === 'status') {
       if (!o.status) { await reply('!status is not available for this bot.'); return; }
       const current = this.active;

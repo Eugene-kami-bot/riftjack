@@ -317,6 +317,9 @@ async function main() {
       } : undefined,
       status: account.kind === 'codex' || account.kind === 'claude'
         ? key => botStatus(account.kind as 'codex' | 'claude', currentConfig(), state.session(key)) + (background?.summary(key, state.session(key)[account.kind as 'codex' | 'claude']) || '') : undefined,
+      tasks: background ? (room, event, key) => background.overview({ room, sender: event.sender!, key,
+        session: state.session(key)[account.kind as 'codex' | 'claude'],
+        thread: event.content?.['m.relates_to']?.rel_type === 'm.thread' ? event.content['m.relates_to'].event_id : undefined }) : undefined,
       usage: account.kind === 'claude' ? async signal => formatClaudeUsage(await claudeUsage(botConfig, signal))
         : account.kind === 'codex' ? signal => codexUsage(botConfig, signal) : undefined,
       acceptManagerAvatar: (prompt, sender) => {

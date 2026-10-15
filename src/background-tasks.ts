@@ -190,6 +190,28 @@ export class BackgroundTasks {
     const items = this.watches.filter(w => w.key === key && w.session === session);
     return `\n\n**Background watches:** ${items.filter(w => w.state === 'waiting' && !w.timer).length} waiting; ${items.filter(w => w.state === 'waiting' && w.timer).length} timers pending; ${items.filter(w => w.state === 'interrupted' || w.timer?.lastRun?.state === 'interrupted').length} interrupted (delivery uncertain; inspect before retrying).`;
   }
+  // Unlike a linked session's aggregate counts, a human-facing list must not
+  // expose registrations from another room, sender or delivery thread.
+  overview(target: Omit<BackgroundTarget, 'session'> & { session?: string }): string {
+    const items = this.watches.filter(w => w.key === target.key && w.session === target.session &&
+      w.room === target.room && w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace);
+    if (!items.length) return 'No background watches or reminders in this conversation.';
+    const active = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery;
+    const ordered = [...items.filter(active).reverse(), ...items.filter(w => !active(w)).reverse()];
+    const lines = ordered.slice(0, 20).map(w => {
+      const kind = w.timer ? w.timer.schedule ? 'recurring reminder' : 'reminder' : 'watch';
+      const timing = `${w.timer ? 'Due' : 'Expires'}: ${new Date(w.expires).toISOString()}`;
+      const last = w.timer?.lastRun;
+      const schedule = w.timer?.schedule;
+      return `${w.label} (${kind}; ${w.state})\nID: ${w.id}\n${timing}` +
+        (schedule ? `\nSchedule: ${schedule.frequency}, ${schedule.time} (${schedule.timezone})` +
+          (schedule.frequency === 'weekly' ? `, ${['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][schedule.weekday! - 1]}` : '') : '') +
+        (last ? `\nLast delivery: ${last.state} (${new Date(last.due).toISOString()})` : '') +
+        (!w.timer && short(w.result, 80) ? `\nObserved status: ${w.result}` : '');
+    });
+    return `Background tasks (${Math.min(items.length, 20)} of ${items.length}; active first, newest registrations first):\n\n` +
+      lines.join('\n\n') + '\n\nDelivery is not proof of task success. Interrupted delivery is uncertain; inspect before retrying. Cancellation stops monitoring, not the process.';
+  }
   async pump(options: {
     valid: (target: BackgroundTarget) => boolean;
     // `ready` must be checked synchronously right before `admitted`: a watch may
