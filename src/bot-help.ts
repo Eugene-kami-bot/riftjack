@@ -34,7 +34,7 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '- `!restart` — restart all bots.\n- `!restart supervisor` — also restart the supervisor process.',
     'All active tasks must finish first. The startup notice returns to the same chat or thread.',
     '### Background tasks',
-    '`!tasks` — list background watches and reminders for this chat/thread without a model request, including while busy. Delivery state is not proof of task success.',
+    '`!tasks` — list active watches, reminders and unfinished notifications for this chat/thread, including while busy. `!tasks history` shows retained finished and cancelled registrations. Add a page number, for example `!tasks history 2`. Delivery state is not proof of task success.',
     '---',
     'Messages starting with `!` are commands. Unknown commands are not sent to the agent. Create bots and manage access in **Bot Manager**. “Owner” means the initial connector owner.',
   ].join('\n\n');

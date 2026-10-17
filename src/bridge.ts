@@ -56,7 +56,7 @@ type Options = {
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
-  tasks?: (room: string, event: MatrixEvent, key: string) => string;
+  tasks?: (room: string, event: MatrixEvent, key: string, options: { history: boolean; page: number }) => string;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -246,7 +246,8 @@ export class Bridge {
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
-    const verb = publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status|tasks)$/.exec(prompt)?.[1]) || o.kind;
+    const tasksCommand = !media && /^!tasks(?:\s|$)/.test(prompt);
+    const verb = tasksCommand ? 'tasks' : publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status|tasks)$/.exec(prompt)?.[1]) || o.kind;
     // All local bots share State. Claim this connector-wide command once,
     // after authorization but before even the stopping/busy reply. Persisting
     // the claim also silences delayed copies received after the restart.
@@ -313,7 +314,12 @@ export class Bridge {
     }
     if (verb === 'help') { await this.reply(room, event, help(o.kind), true); return; }
     if (verb === 'tasks') {
-      await reply(o.tasks ? o.tasks(room, event, backendKey) : '!tasks is not available for this bot.');
+      const match = /^!tasks(?: (history))?(?: ([1-9]\d*))?$/.exec(prompt);
+      const page = Number(match?.[2] ?? 1);
+      if (!match || !Number.isSafeInteger(page) || page > 10) {
+        await reply('Use !tasks [page] or !tasks history [page] (page 1–10).'); return;
+      }
+      await reply(o.tasks ? o.tasks(room, event, backendKey, { history: !!match[1], page }) : '!tasks is not available for this bot.');
       return;
     }
     if (verb === 'status') {

@@ -60,6 +60,17 @@ test('background MCP advertises and schedules delayed messages', async t => {
   assert.ok(posts.includes('Check project updates.'));
   const cancelled = JSON.parse((await call(6, 'tools/call', { name: 'background_tasks', arguments: { action: 'cancel', id: recurring.id } })).result.content[0].text);
   assert.equal(cancelled.state, 'cancelled');
+  const properties = tools.result.tools[0].inputSchema.properties;
+  assert.ok(properties.action.enum.includes('history'));
+  assert.equal(properties.limit.maximum, 100);
+  const active = JSON.parse((await call(7, 'tools/call', { name: 'background_tasks', arguments: { action: 'list' } })).result.content[0].text);
+  assert.ok(!active.some((w: { id: string }) => w.id === recurring.id));
+  const history = JSON.parse((await call(8, 'tools/call', { name: 'background_tasks', arguments: {
+    action: 'history', kind: 'timer', state: 'cancelled', limit: 1, offset: 0,
+  } })).result.content[0].text);
+  assert.deepEqual(history.items.map((w: { id: string }) => w.id), [recurring.id]);
+  assert.equal(history.total, 1); assert.equal(history.next_offset, null);
+
 });
 
 for (const kind of ['codex', 'claude'] as const) test(`${kind} registers through MCP and resumes the same session after completion`, { timeout: 20_000 }, async t => {

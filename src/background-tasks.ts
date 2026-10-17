@@ -17,6 +17,13 @@ type Watch = BackgroundTarget & { id: string; label: string; file: string; field
   stale?: { minutes: number; updated: number };
   timer?: { message: string; deliver: 'agent' | 'room'; schedule?: ReminderSchedule;
     lastRun?: { due: number; state: 'dispatching' | 'delivered' | 'interrupted' | 'cancelled' } } };
+// Uncertain notifications remain visible even when there is no replayable delivery.
+const current = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || w.state === 'interrupted' || !!w.delivery;
+const describe = (w: Watch) => w.timer
+  ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, due: new Date(w.expires).toISOString(), message: w.timer.message, state: w.state,
+    ...(w.timer.schedule && { schedule: w.timer.schedule, lastRun: w.timer.lastRun }) }
+  : { id: w.id, label: w.label, kind: 'watch', status_file: w.file, state: w.state, result: w.result,
+    ...(w.pid !== undefined && { pid: w.pid }), ...(w.stale && { stale_after_minutes: w.stale.minutes, last_update: new Date(w.stale.updated).toISOString() }), expires: new Date(w.expires).toISOString() };
 export const MAX_REMINDER_MINUTES = 60 * 24 * 60;
 const MAX_STALE_MINUTES = 7 * 24 * 60;
 const validPid = (pid: unknown): pid is number => Number.isInteger(pid) && (pid as number) > 0 && (pid as number) <= 2_147_483_647;
@@ -116,10 +123,23 @@ export class BackgroundTasks {
     signal.throwIfAborted();
     if (!record(input)) throw new PublicError('Supply a background task action.');
     const visible = (w: Watch) => w.key === target.key && w.session === target.session;
-    if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.watches.filter(visible).map(w => w.timer
-      ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, due: new Date(w.expires).toISOString(), message: w.timer.message, state: w.state,
-        ...(w.timer.schedule && { schedule: w.timer.schedule, lastRun: w.timer.lastRun }) }
-      : { id: w.id, label: w.label, status_file: w.file, state: w.state, result: w.result, ...(w.pid !== undefined && { pid: w.pid }), ...(w.stale && { stale_after_minutes: w.stale.minutes, last_update: new Date(w.stale.updated).toISOString() }), expires: new Date(w.expires).toISOString() }));
+    if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.watches.filter(w => visible(w) && current(w)).map(describe));
+    if (input.action === 'history') {
+      const limit = input.limit === undefined ? 20 : input.limit, offset = input.offset === undefined ? 0 : input.offset;
+      if (Object.keys(input).some(k => !['action', 'limit', 'offset', 'state', 'kind'].includes(k)) ||
+        !Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 100 ||
+        !Number.isSafeInteger(offset) || (offset as number) < 0 ||
+        (input.state !== undefined && !['delivered', 'cancelled'].includes(input.state as string)) ||
+        (input.kind !== undefined && !['watch', 'timer'].includes(input.kind as string))) {
+        throw new PublicError('Use history with optional limit (1–100), offset (nonnegative integer), state (delivered/cancelled), and kind (watch/timer).');
+      }
+      const items = this.watches.filter(w => visible(w) && !current(w) &&
+        (input.state === undefined || w.state === input.state) &&
+        (input.kind === undefined || (w.timer ? 'timer' : 'watch') === input.kind)).reverse();
+      const end = Math.min(items.length, (offset as number) + (limit as number));
+      return JSON.stringify({ items: items.slice(offset as number, end).map(describe), total: items.length,
+        next_offset: end < items.length ? end : null });
+    }
     if (input.action === 'remind') {
       const at = typeof input.at === 'string' && /T.*(?:Z|[+-]\d\d:\d\d)$/.test(input.at) ? Date.parse(input.at) : NaN;
       const delay = input.delay_minutes;
@@ -192,13 +212,16 @@ export class BackgroundTasks {
   }
   // Unlike a linked session's aggregate counts, a human-facing list must not
   // expose registrations from another room, sender or delivery thread.
-  overview(target: Omit<BackgroundTarget, 'session'> & { session?: string }): string {
+  overview(target: Omit<BackgroundTarget, 'session'> & { session?: string }, options = { history: false, page: 1 }): string {
     const items = this.watches.filter(w => w.key === target.key && w.session === target.session &&
-      w.room === target.room && w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace);
-    if (!items.length) return 'No background watches or reminders in this conversation.';
-    const active = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery;
-    const ordered = [...items.filter(active).reverse(), ...items.filter(w => !active(w)).reverse()];
-    const lines = ordered.slice(0, 20).map(w => {
+      w.room === target.room && w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace &&
+      (options.history ? !current(w) : current(w)));
+    if (!items.length) return options.history ? 'No retained background task history in this conversation.'
+      : 'No active background watches or reminders in this conversation. Use !tasks history for retained history.';
+    const start = (options.page - 1) * 20;
+    const page = items.slice().reverse().slice(start, start + 20);
+    if (!page.length) return 'No tasks on this page.';
+    const lines = page.map(w => {
       const kind = w.timer ? w.timer.schedule ? 'recurring reminder' : 'reminder' : 'watch';
       const timing = `${w.timer ? 'Due' : 'Expires'}: ${new Date(w.expires).toISOString()}`;
       const last = w.timer?.lastRun;
@@ -209,8 +232,10 @@ export class BackgroundTasks {
         (last ? `\nLast delivery: ${last.state} (${new Date(last.due).toISOString()})` : '') +
         (!w.timer && short(w.result, 80) ? `\nObserved status: ${w.result}` : '');
     });
-    return `Background tasks (${Math.min(items.length, 20)} of ${items.length}; active first, newest registrations first):\n\n` +
-      lines.join('\n\n') + '\n\nDelivery is not proof of task success. Interrupted delivery is uncertain; inspect before retrying. Cancellation stops monitoring, not the process.';
+    return `Background ${options.history ? 'task history' : 'tasks'} (${start + 1}–${start + page.length} of ${items.length}; newest registrations first):\n\n` +
+      lines.join('\n\n') +
+      (start + page.length < items.length ? `\n\nNext: !tasks${options.history ? ' history' : ''} ${options.page + 1}` : '') +
+      (options.history ? '' : '\n\nRetained history: !tasks history') + '\n\nDelivery is not proof of task success. Interrupted delivery is uncertain; inspect before retrying. Cancellation stops monitoring, not the process.';
   }
   async pump(options: {
     valid: (target: BackgroundTarget) => boolean;

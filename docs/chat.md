@@ -104,20 +104,34 @@ Riftjack is offline, the producer must leave the terminal state in the file unti
 it can be observed. A watch expires after 24 hours by default (configurable from
 1 to 168 hours) and then reports that expiry; this does not mean the process ended.
 
-Use `{"action":"list"}` to inspect this conversation's watches, or
-`{"action":"cancel","id":"WATCH_ID"}` to cancel one. Cancellation stops watching,
-not the background process. `!status` shows waiting and interrupted counts.
-Use `!tasks` for a local, read-only overview without a model request, including
-while the agent is busy. It shows up to 20 registrations from the current room,
-sender, thread and agent session: active entries first, newest registrations first
-within each group. Labels, IDs, delivery states and UTC due/expiry times are shown;
-recurring reminders include their frequency, local time, IANA timezone, weekday
-for weekly schedules and last delivery, and finished watches include
-their observed status. Reminder text and status-file contents are not exposed.
-Linked sessions do not expose another room's registrations through this command.
-Recent finished records may have been pruned; this is not a complete execution
-history or proof that a monitored process succeeded. It does not read status
-files, launch work, cancel registrations or stop processes.
+Use `{"action":"list"}` to inspect active watches, timers and unfinished or uncertain
+notifications in this conversation. A process finishing does not hide its notification:
+it stays visible until the agent turn completes successfully, including after a failure
+and connector restart. Cancel with `{"action":"cancel","id":"WATCH_ID"}`; this stops
+monitoring, not the background process. `!status` shows waiting and interrupted counts.
+
+Use `{"action":"history","state":"delivered","kind":"watch","limit":20,"offset":0}`
+for retained finished registrations. All four parameters are optional: `state` selects
+`delivered` or `cancelled`, `kind` selects `watch` or `timer`, `limit` is 1–100 (default
+20), and `offset` defaults to 0. The response contains `items`, `total` and
+`next_offset` (null at the end). Repeat the same filters with that offset for the next
+page. Records are ordered newest registration first. Pages reflect the current retained
+records, so concurrent registrations or pruning can shift offsets. Recurring timers
+stay in the active list between runs; their `lastRun` describes the latest occurrence.
+
+Use `!tasks` for a local, read-only overview without a model request, including while
+the agent is busy. It shows only current registrations; `!tasks history` shows retained
+finished and cancelled entries. Both show 20 per page, newest registration first;
+use `!tasks 2` or `!tasks history 2` for the next page. Labels, IDs, delivery states
+and UTC due/expiry times are shown; recurring reminders include their schedule and
+last delivery. Reminder text and status-file contents are not exposed. The command
+is scoped to the current room, sender, thread and agent session, even with linked
+sessions.
+
+History uses the existing bounded retention and may have been pruned; it is not a
+permanent execution log. Delivered means the notification was handled, not that the
+monitored process succeeded. Listing does not read status files, launch work, cancel
+registrations or stop processes.
 Repeated registration of the same pending file and field returns the existing
 watch; changing terminal states requires cancelling it first. A bot may have up
 to 100 active watches. Recent completed records are retained with a bounded limit.

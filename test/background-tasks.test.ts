@@ -26,7 +26,7 @@ const report = (error: unknown) => { throw error; };
 
 test('task overview is read-only and isolates delivery scopes even with a shared session key', t => {
   const f = setup(t);
-  assert.match(f.queue.overview(target), /No background/);
+  assert.match(f.queue.overview(target), /No active background/);
   const reminder = { action: 'remind', label: 'Visible reminder', message: 'Do not expose this reminder body', deliver: 'agent', delay_minutes: 5 };
   const saved = JSON.parse(f.queue.action(reminder, target, signal()));
   f.queue.action(input, target, signal());
@@ -41,7 +41,7 @@ test('task overview is read-only and isolates delivery scopes even with a shared
   for (const secret of ['Hidden reminder', reminder.message, 'status.json', 'do not forward private data']) assert.ok(!text.includes(secret));
   assert.equal(readFileSync(f.file, 'utf8'), before);
   assert.match(new BackgroundTasks(f.file, f.root).overview(target), /2 of 2/);
-  assert.match(f.queue.overview({ ...target, session: undefined }), /No background/);
+  assert.match(f.queue.overview({ ...target, session: undefined }), /No active background/);
 });
 
 test('task overview displays persisted recurrence rules without mutating state or exposing reminder text', t => {
@@ -71,15 +71,17 @@ test('task overview shows observed results and recurring delivery uncertainty wi
   await f.queue.pump({ valid: () => true, report: () => {}, deliver: async () => false,
     post: async (_target, _message, admit) => { admit(); throw new Error('Uncertain delivery'); } }, Date.parse(reminder.due));
   const text = new BackgroundTasks(f.file, f.root).overview(target);
-  assert.match(text, /Observed status: failed/);
-  assert.match(text, /Example build \(watch; delivered\)/);
+  assert.doesNotMatch(text, /Example build/);
+  const history = f.queue.overview(target, { history: true, page: 1 });
+  assert.match(history, /Observed status: failed/);
+  assert.match(history, /Example build \(watch; delivered\)/);
   assert.match(text, /Daily check \(recurring reminder; waiting\)/);
   assert.match(text, /Last delivery: interrupted/);
-  assert.ok(text.indexOf('Daily check') < text.indexOf('Example build'));
+  assert.doesNotMatch(history, /Daily check/);
   assert.match(text, /not proof of task success/);
 });
 
-test('task overview limits output and prioritizes active over newest completed registrations', t => {
+test('task overview separates history and paginates retained registrations', t => {
   const f = setup(t);
   const reminder = { action: 'remind', message: 'Check', deliver: 'agent', delay_minutes: 5 };
   f.queue.action({ ...reminder, label: 'Active oldest' }, target, signal());
@@ -88,10 +90,15 @@ test('task overview limits output and prioritizes active over newest completed r
     f.queue.action({ action: 'cancel', id: saved.id }, target, signal());
   }
   const text = f.queue.overview(target);
-  assert.match(text, /20 of 26/); assert.match(text, /Active oldest/);
-  assert.ok(text.indexOf('Active oldest') < text.indexOf('Completed 24'));
-  assert.ok(!text.includes('Completed 0 ('));
-  assert.equal(text.split('ID: ').length - 1, 20);
+  assert.match(text, /1 of 1/); assert.match(text, /Active oldest/);
+  assert.doesNotMatch(text, /Completed/);
+  const first = f.queue.overview(target, { history: true, page: 1 });
+  const second = f.queue.overview(target, { history: true, page: 2 });
+  assert.match(first, /20 of 25/); assert.match(first, /Next: !tasks history 2/);
+  assert.match(first, /Completed 24/); assert.doesNotMatch(first, /Completed 0 \(/);
+  assert.equal(first.split('ID: ').length - 1, 20);
+  assert.equal(second.split('ID: ').length - 1, 5);
+  assert.match(second, /Completed 0/); assert.doesNotMatch(second, /Next:/);
 });
 
 test('task overview keeps interrupted retained deliveries ahead of newer cancelled registrations', async t => {
@@ -108,9 +115,9 @@ test('task overview keeps interrupted retained deliveries ahead of newer cancell
   }
   const before = readFileSync(f.file, 'utf8');
   const text = f.queue.overview(target);
-  assert.match(text, /20 of 21/);
+  assert.match(text, /1 of 1/);
   assert.ok(text.includes(pending.id));
-  assert.ok(text.indexOf('Pending recovery') < text.indexOf('Cancelled 19'));
+  assert.doesNotMatch(text, /Cancelled 19/);
   assert.doesNotMatch(text, /Private reminder body/);
   assert.equal(readFileSync(f.file, 'utf8'), before);
 });
@@ -156,7 +163,7 @@ test('recurring reminders advance before admission and retain future runs after 
   assert.ok(Date.parse(saved.due) > due);
   await recovered!.pump({ valid: () => true, report, deliver: async () => assert.fail('No replay'), post: async () => assert.fail('No replay') }, due);
   await recovered!.pump({ valid: () => false, report, deliver: async () => assert.fail('Revoked schedule') }, Date.parse(saved.due));
-  assert.equal(JSON.parse(recovered!.action({ action: 'list' }, target, signal()))[0].state, 'cancelled');
+  assert.equal(JSON.parse(recovered!.action({ action: 'history' }, target, signal())).items[0].state, 'cancelled');
 });
 
 test('recurring reminders reject mixed timing forms and invalid persisted schedules', t => {
@@ -187,7 +194,7 @@ test('cancelling a recurring reminder during delivery stops future runs', async 
   await f.queue.pump(options, Date.parse(registered.due));
   await f.queue.pump(options, Date.parse(registered.due) + 3 * 86_400_000);
   assert.equal(calls, 1);
-  assert.equal(JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0].state, 'cancelled');
+  assert.equal(JSON.parse(f.queue.action({ action: 'history' }, target, signal())).items[0].state, 'cancelled');
 });
 
 test('watches survive restart and dispatch a terminal result only once to the bound thread', async t => {
@@ -217,7 +224,7 @@ test('busy delivery remains pending, while reset or revoked access cancels it', 
   await f.queue.pump({ valid: () => true, report, deliver: async () => false });
   assert.match(f.queue.summary(target.key, target.session), /1 waiting/);
   await f.queue.pump({ valid: () => false, report, deliver: async () => assert.fail('Revoked watch must not deliver') });
-  assert.equal(JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0].state, 'cancelled');
+  assert.equal(JSON.parse(f.queue.action({ action: 'history' }, target, signal())).items[0].state, 'cancelled');
 });
 
 test('missing or malformed files expire and an admitted notification is recovered after restart', async t => {
@@ -338,7 +345,8 @@ test('timers wait until due, survive restart and deliver once as a reminder or a
   await new BackgroundTasks(f.file, f.root).pump(options, Date.now() + 12 * 60_000);
   assert.equal(posts.length, 1); assert.equal(reminders.length, 1);
   assert.match(reminders[0], /not a new human instruction[^]*"label":"Check"/);
-  const states = JSON.parse(queue.action({ action: 'list' }, target, signal()));
+  const states = JSON.parse(queue.action({ action: 'history' }, target, signal())).items.reverse();
+  assert.equal(queue.action({ action: 'list' }, target, signal()), '[]');
   assert.deepEqual(states.map((s: { id: string; state: string }) => [s.id, s.state]), [[room.id, 'delivered'], [agent.id, 'delivered']]);
   assert.match(queue.summary(target.key, target.session), /0 timers pending/);
 });
@@ -386,7 +394,7 @@ test('sixty-day reminders survive restart and retain their due time', async t =>
   assert.deepEqual(sent, []);
   await queue.pump(delivery, due);
   assert.deepEqual(sent, [base.message, base.message]);
-  const saved = JSON.parse(new BackgroundTasks(f.file, f.root).action({ action: 'list' }, target, signal()));
+  const saved = JSON.parse(new BackgroundTasks(f.file, f.root).action({ action: 'history' }, target, signal())).items;
   assert.deepEqual(saved.map((w: { state: string }) => w.state), ['delivered', 'delivered']);
 });
 
@@ -396,7 +404,8 @@ test('finished timers are pruned so the saved state always loads again', async t
     const { id } = JSON.parse(f.queue.action({ action: 'remind', label: 'Loop', message: 'x', deliver: 'room', delay_minutes: 5 }, target, signal()));
     f.queue.action({ action: 'cancel', id }, target, signal());
   }
-  assert.ok(JSON.parse(new BackgroundTasks(f.file, f.root).action({ action: 'list' }, target, signal())).length <= 100);
+  assert.equal(new BackgroundTasks(f.file, f.root).action({ action: 'list' }, target, signal()), '[]');
+  assert.equal(JSON.parse(new BackgroundTasks(f.file, f.root).action({ action: 'history', limit: 100 }, target, signal())).total, 100);
 });
 
 test('a timer cancelled, reset or revoked during the room check is not sent', async t => {
@@ -525,4 +534,85 @@ test('a real supervised process exiting without a terminal file wakes the watch'
     admit(); delivered = true; return true;
   } });
   assert.equal(delivered, true);
+});
+
+
+test('history filters and pages only terminal registrations in the bound session', async t => {
+  const f = setup(t);
+  const watch = JSON.parse(f.queue.action(input, target, signal()));
+  f.status('complete');
+  await f.queue.pump({ valid: () => true, report, deliver: async (_t, _e, admit) => { admit(); return true; } });
+  const timer = { action: 'remind', label: 'Check', message: 'Check', deliver: 'agent', delay_minutes: 1 };
+  const cancelled: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const { id } = JSON.parse(f.queue.action(timer, target, signal()));
+    cancelled.push(id); f.queue.action({ action: 'cancel', id }, target, signal());
+  }
+  const other = { ...target, session: 'other' };
+  const hidden = JSON.parse(f.queue.action(timer, other, signal()));
+  f.queue.action({ action: 'cancel', id: hidden.id }, other, signal());
+  const active = JSON.parse(f.queue.action(timer, target, signal()));
+  const before = readFileSync(f.file, 'utf8');
+  const query = (args: object = {}) => JSON.parse(f.queue.action({ action: 'history', ...args }, target, signal()));
+  const first = query({ state: 'cancelled', kind: 'timer', limit: 2 });
+  assert.deepEqual(first.items.map((w: { id: string }) => w.id), cancelled.slice(1).reverse());
+  assert.equal(first.total, 3); assert.equal(first.next_offset, 2);
+  const last = query({ state: 'cancelled', kind: 'timer', limit: 2, offset: first.next_offset });
+  assert.deepEqual(last.items.map((w: { id: string }) => w.id), [cancelled[0]]);
+  assert.equal(last.next_offset, null);
+  assert.deepEqual(query({ kind: 'watch', state: 'delivered' }).items.map((w: { id: string }) => w.id), [watch.id]);
+  assert.deepEqual(query({ offset: 100 }).items, []);
+  assert.equal(query().total, 4);
+  assert.deepEqual(JSON.parse(f.queue.action({ action: 'list' }, target, signal())).map((w: { id: string }) => w.id), [active.id]);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+  for (const invalid of [{ limit: null }, { offset: null }, { limit: 0 }, { limit: 101 }, { offset: -1 }, { offset: 0.5 }, { limit: '2' }, { state: 'waiting' }, { kind: 'other' }, { id: watch.id }]) {
+    assert.throws(() => query(invalid), /Use history/);
+  }
+});
+
+test('unfinished notifications stay current through admission, failure and restart until completion', async t => {
+  const f = setup(t);
+  const registered = JSON.parse(f.queue.action(input, target, signal()));
+  f.status('complete');
+  const checkCurrent = (queue: BackgroundTasks) => {
+    assert.deepEqual(JSON.parse(queue.action({ action: 'list' }, target, signal())).map((w: { id: string }) => w.id), [registered.id]);
+    assert.equal(JSON.parse(queue.action({ action: 'history' }, target, signal())).total, 0);
+    assert.match(queue.overview(target), /Example build/);
+  };
+  await f.queue.pump({ valid: () => true, report: () => {}, deliver: async (_t, _e, admit) => {
+    admit(); checkCurrent(f.queue); throw new Error('Interrupted turn');
+  } });
+  checkCurrent(f.queue);
+  const recovered = new BackgroundTasks(f.file, f.root);
+  checkCurrent(recovered);
+  await recovered.pump({ valid: () => true, report, deliver: async (_t, _e, admit, _ready, complete) => {
+    admit(); checkCurrent(recovered); complete(); return true;
+  } });
+  assert.equal(recovered.action({ action: 'list' }, target, signal()), '[]');
+  assert.equal(JSON.parse(recovered.action({ action: 'history' }, target, signal())).items[0].id, registered.id);
+  assert.doesNotMatch(recovered.overview(target), /Example build/);
+});
+
+
+test('history overview keeps room, sender and thread isolation even with linked sessions', t => {
+  const f = setup(t);
+  const timer = { action: 'remind', label: 'Private history', message: 'Secret', deliver: 'agent', delay_minutes: 1 };
+  for (const scope of [{ room: '!private:test' }, { sender: '@other:test' }, { thread: '$other' },
+    { thread: undefined }, { session: 'other-session' }, { key: 'other-key' }]) {
+    const other = { ...target, ...scope };
+    const { id } = JSON.parse(f.queue.action(timer, other, signal()));
+    f.queue.action({ action: 'cancel', id }, other, signal());
+  }
+  assert.doesNotMatch(f.queue.overview(target, { history: true, page: 1 }), /Private history|Secret/);
+});
+
+test('uncertain one-time room delivery remains current without automatic replay', async t => {
+  const f = setup(t);
+  const timer = JSON.parse(f.queue.action({ action: 'remind', label: 'Uncertain post', message: 'Hello', deliver: 'room', delay_minutes: 1 }, target, signal()));
+  await f.queue.pump({ valid: () => true, report: () => {}, deliver: async () => false,
+    post: async (_t, _m, admit) => { admit(); throw new Error('Connection lost'); } }, Date.parse(timer.due));
+  const queue = new BackgroundTasks(f.file, f.root);
+  await queue.pump({ valid: () => true, report, deliver: async () => false, post: async () => { throw new Error('Must not replay'); } });
+  assert.equal(JSON.parse(queue.action({ action: 'list' }, target, signal()))[0].state, 'interrupted');
+  assert.equal(JSON.parse(queue.action({ action: 'history' }, target, signal())).total, 0);
 });

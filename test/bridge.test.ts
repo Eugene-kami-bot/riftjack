@@ -814,6 +814,22 @@ for (const kind of ['codex', 'claude'] as const) test(`!tasks (${kind}) is local
   } finally { finish.release(); await task; }
 });
 
+for (const kind of ['codex', 'claude'] as const) test(`!tasks history (${kind}) pages locally without a model turn`, async t => {
+  const received: unknown[] = [];
+  const f = fixture(t, kind, async () => { throw new Error('Unexpected model turn'); }, true, {
+    tasks: (room, event, key, options) => { received.push({ room, key, options }); return 'Page'; },
+  });
+  for (const [command, history, page] of [['!tasks', false, 1], ['!tasks 2', false, 2], ['!tasks history', true, 1], ['!tasks history 2', true, 2]] as const) {
+    await f.bridge.handle('!dm:test', event(command, '$page-' + command));
+    assert.deepEqual(received.at(-1), { room: '!dm:test', key: sessionKey('!dm:test', event(command)), options: { history, page } });
+  }
+  for (const command of ['!tasks history 0', '!tasks 11', '!tasks history -1', '!tasks history 1.5', '!tasks history extra']) {
+    await f.bridge.handle('!dm:test', event(command, '$invalid-' + command));
+    assert.match(f.replies.at(-1)!, /Use !tasks/);
+  }
+  assert.equal(received.length, 4);
+});
+
 test('!tasks respects room privacy and unsupported bots', async t => {
   let reads = 0;
   const f = fixture(t, 'codex', undefined, false, { tasks: () => { reads++; return 'private'; } });
