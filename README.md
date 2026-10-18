@@ -153,3 +153,10 @@ See [working through Matrix](docs/chat.md) for confirmations, attachments, plugi
 - [Development and validation](docs/development.md)
 
 Riftjack is available under the [MIT License](LICENSE). Dependencies retain their own licenses.
+
+### GitHub event subscriptions
+
+Agents can select PRs and event types to monitor, then react when CI, reviews,
+comments or PR state changes. Owner configuration controls allowed repositories
+and GitHub credentials. See [GitHub subscriptions](docs/github-subscriptions.md)
+for setup, the tool interface and delivery semantics.

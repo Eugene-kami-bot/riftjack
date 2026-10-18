@@ -1,3 +1,4 @@
+import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-subscriptions.js';
 import { linkedRoomMessages } from './room-messages.js';
 import { sendCompactionNotice } from './compaction-notices.js';
 import { sendOwnerDiagnostic } from './owner-diagnostics.js';
@@ -66,7 +67,11 @@ async function main() {
     return;
   }
   let config: Config;
-  try { config = loadConfig(); } catch (error) { console.error((error as Error).message); process.exitCode = CONFIG_EXIT_CODE; return; }
+  let githubPolicies: ReturnType<typeof loadGitHubPolicies>;
+  try {
+    config = loadConfig();
+    githubPolicies = loadGitHubPolicies(config.githubSubscriptionsFile, config.workspace);
+  } catch (error) { console.error((error as Error).message); process.exitCode = CONFIG_EXIT_CODE; return; }
   notifySupervisor({ type: 'connector-config', dataDir: config.dataDir });
   if (process.argv.includes('--check-config')) {
     if (config.audioTranscriptionWarning) console.warn(config.audioTranscriptionWarning);
@@ -142,6 +147,10 @@ async function main() {
   const workerServer = new WorkerServer();
   const workers = new Map<string, WorkerService>();
   const startupId = randomBytes(16).toString('hex');
+  const githubPumps = new Map<string, () => Promise<void>>();
+  const githubLifetime = new AbortController();
+  const githubTimer = setInterval(() => { for (const pump of githubPumps.values()) void pump().catch(diagnostics); }, 2000);
+  githubTimer.unref();
   const backgroundPumps = new Map<string, () => Promise<void>>();
   const backgroundTimer = setInterval(() => { for (const pump of backgroundPumps.values()) void pump().catch(diagnostics); }, 2000);
   backgroundTimer.unref();
@@ -159,7 +168,7 @@ async function main() {
     stopping = true;
     clearInterval(restartNoticeTimer);
     clearInterval(workerTimer);
-    clearInterval(backgroundTimer);
+    clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
     for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
     void Promise.all([tunnel?.stop(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
       .then(() => process.exit(code));
@@ -187,6 +196,11 @@ async function main() {
     const dir = join(config.dataDir, 'bots', createHash('sha256').update(account.userId).digest('hex'));
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const background = account.kind === 'codex' || account.kind === 'claude' ? new BackgroundTasks(join(dir, 'background-tasks.json'), botConfig.workspace) : undefined;
+    // Also reject owner configuration placed inside a separately assigned bot workspace.
+    loadGitHubPolicies(config.githubSubscriptionsFile, botConfig.workspace);
+    const githubPolicy = githubPolicies[account.userId];
+    const github = background ? new GitHubSubscriptions(join(dir, 'github-subscriptions.json'), githubPolicy, background,
+      githubPolicy ? githubReader(githubPolicy) : undefined) : undefined;
     const storage = new SimpleFsStorageProvider(join(dir, 'matrix.json'));
     const crypto = new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite);
     if (account.kind === 'grok' && !config.workerPort) throw new PublicError('Set WORKER_PORT to enable the Grok worker connection.');
@@ -308,6 +322,13 @@ async function main() {
       accepted: linkedAgent ? () => links.credit(account.userId) : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
+      github: github ? async (input, { room, event, key }, signal) => {
+        const session = state.session(key)[account.kind as 'codex' | 'claude'];
+        if (!session) throw new PublicError('The agent session is not ready for a GitHub subscription.');
+        const relation = event.content?.['m.relates_to'];
+        return github.action(input, { room, sender: event.sender!, key, session,
+          thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal);
+      } : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
         const session = state.session(key)[account.kind as 'codex' | 'claude'];
         if (!session) throw new PublicError('The agent session is not ready for a background watch.');
@@ -482,9 +503,15 @@ async function main() {
     clients.set(account.userId, { client, bridge, privateRoom });
     if (background && bridge instanceof Bridge) {
       const codingBridge = bridge;
+      if (github) githubPumps.set(account.userId, async () => {
+        if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
+        await github.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
+          githubLifetime.signal);
+      });
       backgroundPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
         await codingBridge.drainQueued();
+        github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
         await background.pump({
           valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
           deliver: (target, event, admitted, ready, completed) => codingBridge.resumeBackground(target.room, event, target.session, admitted, ready, completed),

@@ -103,7 +103,7 @@ export class BackgroundTasks {
   }
   // Only the local connector calls this after authenticating and correlating a
   // remote result. Reuses the durable agent-notification completion protocol.
-  notify(id: string, target: BackgroundTarget, message: string, notification: { group: string; progress: boolean }): void {
+  notify(id: string, target: BackgroundTarget, message: string, notification: { group: string; progress: boolean }, label = 'Remote executor result'): void {
     if (this.notified.includes(id)) return;
     if (!short(id) || !timerMessage(message) || !short(notification.group, 4096)) throw new Error('Invalid completion notification.');
     // Keep only the latest pending progress for a job; its completion supersedes
@@ -114,10 +114,20 @@ export class BackgroundTasks {
     if (count - pending.length >= 100) throw new Error('Completion notification queue full.');
     for (const w of pending) w.state = 'cancelled';
     this.prune();
-    this.watches.push({ ...target, id, workspace: this.workspace, label: 'Remote executor result', file: '', field: '', terminal: [],
+    this.watches.push({ ...target, id, workspace: this.workspace, label, file: '', field: '', terminal: [],
       expires: Date.now(), state: 'waiting', timer: { message, deliver: 'agent' }, notification });
     this.notified = [...this.notified, id].slice(-10000);
     this.save();
+  }
+  // Cancel undelivered notices when a subscription is removed or loses access.
+  cancelNotifications(group: string, target: BackgroundTarget): void {
+    let changed = false;
+    for (const w of this.watches) {
+      if (w.notification?.group !== group || w.key !== target.key || w.session !== target.session ||
+          w.room !== target.room || w.sender !== target.sender || w.thread !== target.thread || w.state === 'cancelled' || w.state === 'delivered') continue;
+      w.state = 'cancelled'; delete w.delivery; changed = true;
+    }
+    if (changed) this.save();
   }
   action(input: unknown, target: BackgroundTarget, signal: AbortSignal): string {
     signal.throwIfAborted();
