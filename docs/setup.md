@@ -125,7 +125,12 @@ responses, but an agent able to read the token file can still obtain them.
 Choose limited tokens and protect their files with host access controls.
 
 The default response limit is 20 MiB; `FETCH_MAX_BYTES` accepts 64 KiB through
-256 MiB. Requests have a 120-second deadline and at most five redirects. An
+256 MiB. Each task has its own fetch queue: one request executes at a time,
+with up to 50 waiting. Parallel calls keep their individual responses. Queued
+calls can be cancelled, and ending the task cancels its entire queue. A full
+queue returns an explicit error; other agents have independent queues.
+Requests have a 120-second deadline starting when execution begins (excluding
+queue time), and at most five redirects. An
 empty `FETCH_ALLOW` disables the tool. It is also unavailable to read-only bots.
 See [reading web resources](chat.md#reading-web-resources) for saved files and
 truncated responses.

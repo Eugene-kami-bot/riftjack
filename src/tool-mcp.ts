@@ -10,13 +10,32 @@ const record = (value: unknown): value is Record<string, any> => !!value && type
 // A task-local Streamable HTTP MCP endpoint. No persistent config, public listener,
 // Matrix credentials or API for approving requests. Each action enforces its own
 // destination scope; exposing this transport never authorizes arbitrary rooms.
-export async function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: { server: string; cancelled: string; failed: string }): Promise<ToolConnection & { close(): Promise<void> }> {
+export async function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: { server: string; cancelled: string; failed: string }, options: { maxQueued?: number } = {}): Promise<ToolConnection & { close(): Promise<void> }> {
   signal.throwIfAborted();
+  const maxQueued = options.maxQueued ?? 0;
+  if (!Number.isSafeInteger(maxQueued) || maxQueued < 0) throw new Error('Invalid tool queue capacity.');
   const token = Buffer.from('Bearer ' + randomBytes(32).toString('base64url'));
   const lifetime = new AbortController();
   const requests = new Map<string | number, AbortController>();
   const used = new Set<string | number>();
   const operations = new Set<Promise<void>>();
+  let active = false;
+  const waiting = new Set<() => void>();
+  const acquire = async (callSignal: AbortSignal) => {
+    callSignal.throwIfAborted();
+    if (!active) { active = true; return; }
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => { callSignal.removeEventListener('abort', cancelled); resolve(); };
+      const cancelled = () => { waiting.delete(ready); reject(callSignal.reason); };
+      waiting.add(ready);
+      callSignal.addEventListener('abort', cancelled, { once: true });
+    });
+  };
+  const release = () => {
+    const next = waiting.values().next().value;
+    if (next) { waiting.delete(next); next(); }
+    else active = false;
+  };
   let host = '';
   let closing: Promise<void> | undefined;
   const json = (res: ServerResponse, value: unknown) => {
@@ -60,7 +79,10 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
       if (method === 'tools/list') { result({ tools: [tool] }); return; }
       if (method !== 'tools/call') { error(-32601, 'Method not found.'); return; }
       if (used.has(id)) { error(-32600, 'Request ID already used. Tool calls are never replayed.'); return; }
-      if (used.size >= 1024 || requests.size) { error(-32600, 'A tool call is pending or the task request limit was reached.'); return; }
+      if (used.size >= 1024) { error(-32600, 'The task request limit was reached (1024 calls).'); return; }
+      if (requests.size >= 1 + maxQueued) {
+        error(-32600, maxQueued ? 'The tool request queue is full. Retry after a pending call completes.' : 'A tool call is already pending.'); return;
+      }
       used.add(id);
       if (!record(params) || params.name !== tool.name) { error(-32602, 'Unknown tool.'); return; }
       const controller = new AbortController();
@@ -68,8 +90,11 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
       const disconnected = () => controller.abort();
       requests.set(id, controller);
       res.once('close', disconnected);
+      let acquired = false;
       try {
         const input = params.arguments;
+        await acquire(callSignal);
+        acquired = true;
         callSignal.throwIfAborted();
         const text = await action(input, callSignal);
         callSignal.throwIfAborted();
@@ -78,7 +103,10 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
         result({ isError: true, content: [{ type: 'text', text: callSignal.aborted
           ? messages.cancelled
           : cause instanceof PublicError ? cause.message : messages.failed }] });
-      } finally { res.removeListener('close', disconnected); requests.delete(id); }
+      } finally {
+        res.removeListener('close', disconnected); requests.delete(id);
+        if (acquired) release();
+      }
     };
     const operation = handle().catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
     operations.add(operation);
