@@ -50,6 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!Number.isInteger(workerPort) || workerPort < 0 || workerPort > 65535) throw new Error('WORKER_PORT must be 0 (disabled) or a port from 1 to 65535.');
   return {
     workerPort,
+    githubSubscriptionsFile: env.GITHUB_SUBSCRIPTIONS_CONFIG?.trim() || undefined,
     homeserver: homeserver.toString().replace(/\/$/, ''),
     adminUrl: adminUrl.toString().replace(/\/$/, ''),
     sshTunnel: loadTunnelConfig(env, adminUrl),

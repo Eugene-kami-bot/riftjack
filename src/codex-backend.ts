@@ -1,3 +1,4 @@
+import { startGitHubMcp, GITHUB_SERVER, githubInstructions } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
 import { contextCheckpoints, checkpointDelivery, checkpointInstructions } from './context-checkpoints.js';
@@ -73,6 +74,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
     const seenCompactions = new Set<string>();
     let compactingId: string | undefined;
+    let github: Awaited<ReturnType<typeof startGitHubMcp>> | undefined;
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
@@ -81,6 +83,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
+      if (hooks?.github) github = await startGitHubMcp(hooks.github, signal);
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       // The tool writes response files into the workspace, so a read-only bot does not get it.
       if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
@@ -151,7 +154,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
         + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
@@ -166,6 +169,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
             // Invoking this tool starts the review; requestPublish itself requires Matrix
             // approval after delivering the HTML. Avoid an empty MCP consent form first.
             tools: { prepare_publish: { approval_mode: 'approve' } },
+          } : disabledMcp,
+          [`mcp_servers.${GITHUB_SERVER}`]: github ? { url: github.url, http_headers: github.headers,
+            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['github_subscriptions'],
+            tools: { github_subscriptions: { approval_mode: 'approve' } },
           } : disabledMcp,
           [`mcp_servers.${BACKGROUND_SERVER}`]: background ? { url: background.url, http_headers: background.headers,
             required: true, enabled: true, enabled_tools: ['background_tasks'],
@@ -246,7 +253,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       await rooms?.close();
       await web?.close();
       await progress.catch(() => {});
-      await background?.close(); await publication?.close();
+      await github?.close(); await background?.close(); await publication?.close();
       current.ready.resolve();
       await Promise.allSettled([...current.steering]);
       await current.server?.close();
