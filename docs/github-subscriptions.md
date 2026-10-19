@@ -29,7 +29,9 @@ Set `GITHUB_SUBSCRIPTIONS_CONFIG` to an owner-managed JSON file, for example:
 Keep both the policy and credentials outside agent workspaces, with filesystem
 permissions appropriate to the connector account. The configuration file contains
 no token. Each bot has its own policy entry; entries may share a credentials
-directory deliberately. Repositories are explicit names, without wildcards.
+directory deliberately. Use one credentials directory for bots sharing the same
+GitHub account; separate directories are treated as independent accounts and do
+not share a local request budget. Repositories are explicit names, without wildcards.
 The agent cannot change the policy, credentials directory, host or delivery room
 through the tool. `GH_TOKEN`, `GITHUB_TOKEN` and host/repository overrides are
 removed from the polling subprocess environment so they do not override the
@@ -107,8 +109,11 @@ Reset or revoked access cancels monitoring. Delivery rechecks room access throug
 the existing bridge. Cancelling a subscription removes undelivered notices; it
 does not interrupt a model turn that already began.
 
-Polling is serialized per bot. Requests sharing a credentials directory are spaced
-at least one second apart, and GitHub rate-limit headers delay subsequent requests.
+Polling is serialized per bot. Requests sharing a credentials directory wait for
+the preceding response and start at least one second apart. GitHub rate-limit
+headers delay all subsequent requests, including those already queued by other
+bots. Cancelling a queued request does not release later requests early. Different
+credentials directories have independent queues.
 Failures use exponential backoff up to one hour. `list` exposes the last successful
 poll, last error and next scheduled poll. Three consecutive failures also attempt
 to send one diagnostic notice through the background inbox. A full inbox retains

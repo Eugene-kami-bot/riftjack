@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, relative } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { PublicError } from './errors.js';
 import type { BackgroundTarget, BackgroundTasks } from './background-tasks.js';
 
@@ -36,40 +37,59 @@ export function loadGitHubPolicies(path?: string, workspace?: string): GitHubPol
 }
 
 export type GitHubRead = (endpoint: string, signal: AbortSignal) => Promise<any>;
-const requestSlots = new Map<string, number>();
+type RequestBudget = { tail: Promise<void>; notBefore: number };
+const requestBudgets = new Map<string, RequestBudget>();
+
+// Cancellation must not release a queued request's place before its predecessor
+// finishes: later callers still have to observe that response's rate limit.
+function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason); };
+    signal.addEventListener('abort', abort, { once: true });
+    operation.then(value => { signal.removeEventListener('abort', abort); resolve(value); },
+      error => { signal.removeEventListener('abort', abort); reject(error); });
+    if (signal.aborted) abort();
+  });
+}
+
 export function githubReader(policy: GitHubPolicy): GitHubRead {
   return async (endpoint, signal) => {
-    // Share a request budget between bots using the same credentials directory.
-    // At most one request starts each second (below the usual 5,000/hour limit).
-    const now = Date.now(), due = Math.max(now, requestSlots.get(policy.ghConfigDir) ?? now);
-    requestSlots.set(policy.ghConfigDir, due + 1000);
-    if (due > now) await new Promise<void>((resolve, reject) => {
-      const abort = () => { clearTimeout(timer); reject(signal.reason); };
-      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, due - now);
-      signal.addEventListener('abort', abort, { once: true });
-      if (signal.aborted) abort();
-    });
     signal.throwIfAborted();
-    return new Promise((resolve, reject) => {
-    // Never inherit an agent's repository, host, token override or shell configuration.
-    const env = { ...process.env, GH_CONFIG_DIR: policy.ghConfigDir, GH_PROMPT_DISABLED: '1' };
-    for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GH_REPO']) delete env[key as keyof typeof env];
-    execFile('gh', ['api', '--include', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', endpoint],
-      { cwd: policy.ghConfigDir, env, signal, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
-        const split = stdout.search(/\r?\n\r?\n/);
-        const headers = split >= 0 ? stdout.slice(0, split) : '';
-        const body = split >= 0 ? stdout.slice(split).trimStart() : stdout;
-        const retry = Number(/^retry-after:\s*(\d+)/im.exec(headers)?.[1]);
-        const remaining = /^x-ratelimit-remaining:\s*(\d+)/im.exec(headers)?.[1];
-        const reset = Number(/^x-ratelimit-reset:\s*(\d+)/im.exec(headers)?.[1]);
-        if (retry > 0 || (remaining === '0' && reset > 0)) {
-          const resume = Math.max(Date.now() + (Number.isFinite(retry) ? retry * 1000 : 0), remaining === '0' ? reset * 1000 : 0);
-          requestSlots.set(policy.ghConfigDir, Math.max(requestSlots.get(policy.ghConfigDir) ?? 0, resume));
-        }
-        if (error) { reject(new PublicError('GitHub request failed. Check gh authentication, repository access and API rate limits.')); return; }
-        try { resolve(JSON.parse(body)); } catch { reject(new PublicError('GitHub returned an invalid JSON response.')); }
+    let budget = requestBudgets.get(policy.ghConfigDir);
+    if (!budget) requestBudgets.set(policy.ghConfigDir, budget = { tail: Promise.resolve(), notBefore: 0 });
+    const shared = budget;
+    const request = shared.tail.then(async () => {
+      signal.throwIfAborted();
+      // Serialize through the response, not just the start time. A response may
+      // postpone every request already queued by other bots sharing credentials.
+      while (shared.notBefore > Date.now()) {
+        await sleep(Math.min(shared.notBefore - Date.now(), 2_147_483_647), undefined, { signal });
+      }
+      signal.throwIfAborted();
+      shared.notBefore = Date.now() + 1000;
+      return new Promise((resolve, reject) => {
+        // Never inherit an agent's repository, host, token override or shell configuration.
+        const env = { ...process.env, GH_CONFIG_DIR: policy.ghConfigDir, GH_PROMPT_DISABLED: '1' };
+        for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GH_REPO']) delete env[key as keyof typeof env];
+        execFile('gh', ['api', '--include', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', endpoint],
+          { cwd: policy.ghConfigDir, env, signal, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+            const split = stdout.search(/\r?\n\r?\n/);
+            const headers = split >= 0 ? stdout.slice(0, split) : '';
+            const body = split >= 0 ? stdout.slice(split).trimStart() : stdout;
+            const retry = Number(/^retry-after:\s*(\d+)/im.exec(headers)?.[1]);
+            const remaining = /^x-ratelimit-remaining:\s*(\d+)/im.exec(headers)?.[1];
+            const reset = Number(/^x-ratelimit-reset:\s*(\d+)/im.exec(headers)?.[1]);
+            if (retry > 0 || (remaining === '0' && reset > 0)) {
+              const resume = Math.max(Date.now() + (Number.isFinite(retry) ? retry * 1000 : 0), remaining === '0' ? reset * 1000 : 0);
+              shared.notBefore = Math.max(shared.notBefore, resume);
+            }
+            if (error) { reject(new PublicError('GitHub request failed. Check gh authentication, repository access and API rate limits.')); return; }
+            try { resolve(JSON.parse(body)); } catch { reject(new PublicError('GitHub returned an invalid JSON response.')); }
+          });
       });
     });
+    shared.tail = request.then(() => {}, () => {});
+    return abortable(request, signal);
   };
 }
 
