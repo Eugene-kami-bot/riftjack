@@ -9,11 +9,11 @@ export const publicationInstructions = '\nFor Git publication, call the Riftjack
 
 const tool = {
   name: 'prepare_publish',
-  description: 'Prepare and deliver an HTML review of committed Git changes to the current Matrix conversation, wait for human approval, then publish exactly those commits. This call may wait for up to the task timeout. Respect human declines and cancellations. After a technical interruption, verify the destination and that no previous request remains active before preparing a fresh review with fresh human approval. Do not repeat a completed push; clarify unresolved state before retrying.',
+  description: 'Prepare and deliver an HTML review of committed Git changes to the current Matrix conversation, wait for human approval, then publish exactly those commits. Rebased branches require explicit approval of history replacement, with outgoing and removed history shown and an exact remote-tip lease. This call may wait for up to the task timeout. Respect human declines and cancellations. After a technical interruption, verify the destination and that no previous request remains active before preparing a fresh review with fresh human approval. Do not repeat a completed push; clarify unresolved state before retrying.',
   inputSchema: { type: 'object', additionalProperties: false,
     properties: { repository: { type: 'string', description: 'Git repository path within the bot workspace.' }, remote: { type: 'string', description: 'Named Git remote, for example origin.' }, branch: { type: 'string', description: 'Destination branch, for example main.' } },
     required: ['repository', 'remote', 'branch'] },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 };
 export function startPublishMcp(publish: PublishAction, signal: AbortSignal) {
   return startToolMcp(tool, (input, callSignal) => publish(publishInput(input), callSignal), signal, {

@@ -34,6 +34,7 @@ test('publication MCP advertises the tool, validates requests, and prevents repl
   assert.equal((await post(server, 'notifications/initialized')).status, 202);
   const list = await (await post(server, 'tools/list', 2)).json();
   assert.equal(list.result.tools[0].name, 'prepare_publish');
+  assert.equal(list.result.tools[0].annotations.destructiveHint, true);
   assert.equal(list.result.tools[0].inputSchema.additionalProperties, false);
   assert.equal((await (await call(server, 3, { ...input, approve: true })).json()).result.isError, true);
   assert.equal(calls, 0);
@@ -83,7 +84,7 @@ for (const reason of ['notification', 'disconnect', 'task', 'close'] as const) t
   if (reason === 'notification') assert.match(result.result.content[0].text, /cancelled/);
 });
 
-function fixture(t: { after(fn: () => void): void }) {
+function fixture(t: { after(fn: () => void): void }, rewrite = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'riftjack-publish-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, 'repo'), remote = join(root, 'remote.git'); mkdirSync(repo);
@@ -91,15 +92,19 @@ function fixture(t: { after(fn: () => void): void }) {
   git('init', '-b', 'main'); git('init', '--bare', remote);
   writeFileSync(join(repo, 'demo.txt'), 'before\n'); git('add', '.'); git('commit', '-m', 'Initial');
   git('remote', 'add', 'origin', remote); git('push', 'origin', 'main');
-  const base = git('rev-parse', 'HEAD');
+  let base = git('rev-parse', 'HEAD');
   writeFileSync(join(repo, 'demo.txt'), 'after\n'); git('add', '.'); git('commit', '-m', 'Update');
+  if (rewrite) {
+    git('push', 'origin', 'HEAD:main'); base = git('rev-parse', 'HEAD');
+    git('commit', '--amend', '-m', 'Rebased update');
+  }
   return { root, repo, base, head: git('rev-parse', 'HEAD'), remoteHead: () => git('ls-remote', 'origin', 'refs/heads/main').split('\t')[0] };
 }
 
 // Real backend adapters with tiny CLI doubles: exercise MCP discovery/call over HTTP,
 // Matrix attachment/confirmation delivery and a real push to an isolated bare repo.
-for (const kind of ['codex', 'claude'] as const) for (const sender of ['@owner:test', '@guest:test']) test(`${kind} (${sender}) invokes reviewed publication through MCP and a resumed turn gets a fresh endpoint`, { timeout: 15_000 }, async t => {
-  const f = fixture(t), executable = join(f.root, 'engine.cjs');
+for (const kind of ['codex', 'claude'] as const) for (const sender of ['@owner:test', '@guest:test']) for (const rewrite of [false, true]) test(`${kind} (${sender}, rewrite=${rewrite}) invokes reviewed publication through MCP and a resumed turn gets a fresh endpoint`, { timeout: 15_000 }, async t => {
+  const f = fixture(t, rewrite), executable = join(f.root, 'engine.cjs');
   writeFileSync(executable, `#!/usr/bin/env node
 const fs = require('node:fs');
 const readline = require('node:readline');
@@ -165,7 +170,10 @@ if (args.includes('--print')) {
       assert.equal(f.remoteHead(), f.base);
       uploaded.resolve(); await allowUpload.promise;
     },
-    confirmation: async (_r, _e, _text, controls) => { assert.equal(deliveries, 1); controls.bind('$review'); confirmed.resolve(); },
+    confirmation: async (_r, _e, text, controls) => {
+      if (rewrite) assert.match(text, /HISTORY REPLACEMENT/);
+      else assert.doesNotMatch(text, /HISTORY REPLACEMENT/);
+      assert.equal(deliveries, 1); controls.bind('$review'); confirmed.resolve(); },
   });
   t.after(() => bridge.stop());
   let nextId = 0;

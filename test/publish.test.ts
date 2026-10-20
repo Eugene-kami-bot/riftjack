@@ -141,7 +141,7 @@ test('remote race after revalidation is rejected by the explicit lease', async t
   assert.notEqual(f.remoteHead(), f.head);
 });
 
-test('outside workspaces, unsupported remotes and history replacement are rejected', async t => {
+test('outside workspaces and unsupported remotes are rejected', async t => {
   const f = setup(t);
   await assert.rejects(preparePublish(f.input, join(f.root, 'remote.git'), signal()), /workspace/);
   f.git('remote', 'set-url', '--push', 'origin', 'ext::echo unsafe');
@@ -149,8 +149,6 @@ test('outside workspaces, unsupported remotes and history replacement are reject
   f.git('remote', 'set-url', '--push', 'origin', 'https://user:password@example.com/repo');
   await assert.rejects(f.prepare(), /credential-free/);
   f.git('remote', 'set-url', '--push', 'origin', f.remote);
-  f.git('push', 'origin', 'HEAD:main'); f.git('reset', '--hard', f.base);
-  await assert.rejects(f.prepare(), /not an ancestor/);
   assert.throws(() => publishInput({ ...f.input, remote: '--help' }), /Supply/);
   assert.throws(() => publishInput({ ...f.input, force: true }), /Supply/);
 });
@@ -187,4 +185,80 @@ test('report-only CLI emits structured metadata, never pushes and refuses overwr
   assert.match(readFileSync(output, 'utf8'), /Publication review/);
   assert.throws(() => execFileSync(process.execPath, args, { stdio: 'pipe' }));
   assert.equal(f.remoteHead(), f.base);
+});
+
+function rewritten(t: { after(fn: () => void): void }) {
+  const f = setup(t);
+  f.git('push', 'origin', 'HEAD:main');
+  f.git('commit', '--amend', '-m', 'Rewritten update');
+  return f;
+}
+
+for (const approved of [false, true]) test(`history replacement ${approved ? 'approval' : 'denial'} reviews both histories before pushing`, async t => {
+  const f = rewritten(t), head = f.git('rev-parse', 'HEAD');
+  const r = await f.prepare();
+  assert.equal(r.historyReplacement, true); assert.equal(r.base, f.head);
+  assert.equal(r.patch, ''); assert.deepEqual(r.commits, [head]);
+  assert.deepEqual(r.removedHistory.map(c => c.oid), [f.head]);
+  assert.match(r.html, /History replacement/); assert.match(r.html, /Removed history/);
+  assert.match(r.html, /Update &lt;script&gt;/); assert.doesNotMatch(r.html, /<script>/);
+  assert.ok(Object.isFrozen(r.removedHistory));
+  const result = await requestPublish(f.input, f.root, f.root, 1024 ** 2, signal(), async request => {
+    assert.match(request.text, /HISTORY REPLACEMENT/); assert.match(request.text, /Removed commits/);
+    assert.match(readFileSync(request.attachments![0].path, 'utf8'), new RegExp(f.head));
+    assert.equal(f.remoteHead(), f.head);
+    return approved ? request.approve! : request.deny;
+  }, async () => {});
+  assert.equal(f.remoteHead(), approved ? head : f.head);
+  assert.match(result, approved ? /Published/ : /declined/);
+});
+
+for (const race of ['before-validation', 'after-validation'] as const) test(`history replacement preserves concurrent updates ${race}`, async t => {
+  const f = rewritten(t), r = await f.prepare();
+  const concurrent = f.git('commit-tree', f.git('rev-parse', f.head + '^{tree}'), '-p', f.head, '-m', 'Concurrent work');
+  const advance = () => { f.git('push', 'origin', concurrent + ':main'); };
+  if (race === 'before-validation') advance();
+  await assert.rejects(pushReviewed(r, signal(), async () => { if (race === 'after-validation') advance(); }),
+    race === 'before-validation' ? /changed after review/ : /not confirmed/);
+  assert.equal(f.remoteHead(), concurrent);
+});
+
+test('rebase shows fresh base commits and old reverted history', async t => {
+  const f = setup(t);
+  writeFileSync(join(f.repo, 'temporary.txt'), 'Old history only');
+  f.git('add', '.'); f.git('commit', '-m', 'Intermediate');
+  rmSync(join(f.repo, 'temporary.txt')); f.git('add', '-A'); f.git('commit', '-m', 'Revert');
+  f.git('push', 'origin', 'HEAD:main');
+  const oldHead = f.git('rev-parse', 'HEAD');
+  f.git('checkout', '-b', 'upstream', f.base);
+  writeFileSync(join(f.repo, 'new-base.txt'), 'Upstream change');
+  f.git('add', '.'); f.git('commit', '-m', 'Fresh base');
+  const upstream = f.git('rev-parse', 'HEAD'); f.git('cherry-pick', f.head);
+  const r = await f.prepare();
+  assert.equal(r.base, oldHead); assert.equal(r.historyReplacement, true);
+  assert.equal(r.commits.length, 2); assert.ok(r.commits.includes(upstream));
+  assert.equal(r.removedHistory.length, 3); assert.match(r.html, /Old history only/);
+  assert.match(r.patch, /Upstream change/); assert.doesNotMatch(r.patch, /Old history only/);
+});
+
+test('rollback lists removed commits even without outgoing commits', async t => {
+  const f = setup(t); f.git('push', 'origin', 'HEAD:main'); f.git('reset', '--hard', f.base);
+  const r = await f.prepare();
+  assert.equal(r.historyReplacement, true); assert.equal(r.commits.length, 0);
+  assert.deepEqual(r.removedHistory.map(c => c.oid), [f.head]); assert.match(r.patch, /-<script>/);
+});
+
+test('removed history counts towards the review limit', async t => {
+  const f = setup(t); let parent = f.head;
+  const tree = f.git('rev-parse', 'HEAD^{tree}');
+  for (let i = 0; i < 101; i++) parent = f.git('commit-tree', tree, '-p', parent, '-m', 'Old ' + i);
+  f.git('push', 'origin', parent + ':main');
+  await assert.rejects(f.prepare(), /100 outgoing and removed/);
+});
+
+test('unrelated history is rejected without changing the destination', async t => {
+  const f = setup(t);
+  const unrelated = f.git('commit-tree', f.git('rev-parse', 'HEAD^{tree}'), '-m', 'Unrelated root');
+  f.git('checkout', '--detach', unrelated);
+  await assert.rejects(f.prepare()); assert.equal(f.remoteHead(), f.base);
 });

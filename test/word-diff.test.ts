@@ -7,7 +7,7 @@ import { renderPublishReview } from '../src/publish-html.js';
 const changed = (parts: ReturnType<typeof wordDiff>[0]) => parts.filter(p => p.changed).map(p => p.text).join('');
 function report(patch: string) {
   return renderPublishReview({ repository: '/projects/demo', remote: 'origin', url: 'https://example.com/demo.git', branch: 'main',
-    base: 'a'.repeat(40), reviewBase: 'a'.repeat(40), baseReference: null, head: 'b'.repeat(40), createdAt: '2026-01-01T00:00:00Z', commits: [], history: [], workingTreeDirty: false,
+    base: 'a'.repeat(40), reviewBase: 'a'.repeat(40), baseReference: null, head: 'b'.repeat(40), createdAt: '2026-01-01T00:00:00Z', commits: [], history: [], historyReplacement: false, removedHistory: [], workingTreeDirty: false,
     patch: 'diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n' + patch });
 }
 function rows(html: string) {

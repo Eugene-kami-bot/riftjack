@@ -15,6 +15,7 @@ export type PublishReview = Readonly<PublishInput & {
   url: string; base: string | null; reviewBase: string | null;
   baseReference: Readonly<{ ref: string; head: string }> | null; head: string; createdAt: string;
   commits: readonly string[]; patch: string; history: readonly { oid: string; patch: string }[];
+  historyReplacement: boolean; removedHistory: readonly { oid: string; patch: string }[];
   workingTreeDirty: boolean; html: string; sha256: string;
 }>;
 
@@ -101,10 +102,15 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
   const head = (await git(repository, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)).trim();
   const base = await remoteHead(repository, url, 'refs/heads/' + input.branch, signal);
   if (base === head) throw new PublicError('The destination already contains this HEAD; there is nothing to publish.');
+  let historyReplacement = false;
   if (base) {
     await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, base], signal);
-    try { await git(repository, ['merge-base', '--is-ancestor', base, head], signal); }
-    catch { throw new PublicError('The destination is not an ancestor of HEAD. Reconcile the branches before requesting publication; history replacement is not supported.'); }
+    // A shared ancestor keeps this a branch update, not replacement by an unrelated repository.
+    const ancestors = (await git(repository, ['merge-base', '--all', base, head], signal)).trim().split('\n');
+    if (ancestors.length !== 1 || !/^[a-f0-9]{40,64}$/.test(ancestors[0])) {
+      throw new PublicError('History replacement requires a unique common ancestor with the destination.');
+    }
+    historyReplacement = ancestors[0] !== base;
   }
   let reviewBase = base;
   const baseReference = base ? null : await defaultBranch(repository, url, signal);
@@ -119,22 +125,29 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
   const historyRange = reviewBase ? reviewBase + '..' + head : head;
   const commitList = (await git(repository, ['rev-list', '--max-count=101', '--reverse', historyRange], signal)).trim();
   const commits = commitList ? commitList.split('\n') : [];
-  if (commits.length > 100) throw new PublicError('Review exceeds 100 outgoing commits. Prepare a smaller publication.');
+  const removedList = historyReplacement
+    ? (await git(repository, ['rev-list', '--max-count=101', '--reverse', head + '..' + base], signal)).trim() : '';
+  const removed = removedList ? removedList.split('\n') : [];
+  if (commits.length + removed.length > 100) throw new PublicError('Review exceeds 100 outgoing and removed commits. Prepare a smaller publication.');
   const diffOptions = ['--no-ext-diff', '--no-textconv', '--no-color', '--find-renames', '--ignore-submodules=none'];
   const emptyTree = reviewBase ? undefined : (await git(repository, ['hash-object', '-w', '-t', 'tree', '--stdin'], signal, '')).trim();
   const patch = reviewBase ? await git(repository, ['diff', ...diffOptions, reviewBase, head, '--'], signal)
     : await git(repository, ['diff', ...diffOptions, emptyTree!, head, '--'], signal);
-  const history: { oid: string; patch: string }[] = [];
   let size = Buffer.byteLength(patch);
-  for (const oid of commits) {
-    const content = await git(repository, ['show', '--format=fuller', '--root', '--diff-merges=first-parent', ...diffOptions, oid, '--'], signal);
-    size += Buffer.byteLength(content);
-    if (size > LIMIT) throw new PublicError('Complete review exceeds 8 MiB of text. No truncated review will be approved.');
-    history.push(Object.freeze({ oid, patch: content }));
+  async function readHistory(oids: string[]) {
+    const history: { oid: string; patch: string }[] = [];
+    for (const oid of oids) {
+      const content = await git(repository, ['show', '--format=fuller', '--root', '--diff-merges=first-parent', ...diffOptions, oid, '--'], signal);
+      size += Buffer.byteLength(content);
+      if (size > LIMIT) throw new PublicError('Complete review exceeds 8 MiB of text. No truncated review will be approved.');
+      history.push(Object.freeze({ oid, patch: content }));
+    }
+    return Object.freeze(history);
   }
+  const history = await readHistory(commits), removedHistory = await readHistory(removed);
   const workingTreeDirty = !!(await git(repository, ['status', '--porcelain', '--untracked-files=normal'], signal)).trim();
   const data = { ...input, repository, url, base, reviewBase, baseReference, head, createdAt: new Date().toISOString(), commits: Object.freeze(commits), patch,
-    history: Object.freeze(history), workingTreeDirty };
+    history, historyReplacement, removedHistory, workingTreeDirty };
   const html = renderPublishReview(data);
   return Object.freeze({ ...data, html, sha256: createHash('sha256').update(html).digest('hex') });
 }
@@ -164,13 +177,16 @@ export async function requestPublish(input: unknown, workspace: string, reportRo
     const name = 'publish-' + review.head.slice(0, 12) + '.html', path = join(directory, name);
     await writeFile(path, review.html, { flag: 'wx', mode: 0o600 });
     const decision = await interact({ ...confirmationDetails([
-      { value: 'Publish the commits in the attached HTML review?' },
+      { value: review.historyReplacement ? 'Replace the destination branch history with the attached reviewed history?' : 'Publish the commits in the attached HTML review?' },
+      ...(review.historyReplacement ? [{ value: 'HISTORY REPLACEMENT: the listed removed commits will no longer be reachable from this branch. Review both outgoing and removed history. An exact remote-tip lease protects against concurrent updates.' }] : []),
       { label: 'Repository', value: review.repository, code: true }, { label: 'Destination', value: review.url + ' → ' + review.branch, code: true },
       { label: 'Remote destination tip', value: review.base ?? '[new branch]', code: true },
       { label: 'Review base', value: review.reviewBase ?? '[empty tree]', code: true },
       ...(review.baseReference ? [{ label: 'Published base reference', value: review.baseReference.ref + ' @ ' + review.baseReference.head, code: true as const }] : []),
       { label: 'Publish HEAD', value: review.head, code: true },
-      { label: 'Outgoing commits', value: String(review.commits.length) }, { label: 'Report SHA-256', value: review.sha256, code: true },
+      { label: 'Outgoing commits', value: String(review.commits.length) },
+      ...(review.historyReplacement ? [{ label: 'Removed commits', value: String(review.removedHistory.length) }] : []),
+      { label: 'Report SHA-256', value: review.sha256, code: true },
       { value: 'Only this commit and its history are published. Local uncommitted files and unrelated tags are excluded. Changed HEAD or destination requires a new review.' },
     ]), attachments: [{ path, root: directory, name }], approve: { publish: true }, deny: { publish: false } }, signal);
     signal.throwIfAborted();

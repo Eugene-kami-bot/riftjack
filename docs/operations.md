@@ -71,3 +71,21 @@ before admission. Resetting the session or cancelling the pending home task
 withdraws the notice. It grants no new permissions or confirmation approvals.
 New bots without an established conversation, Bot Manager and externally driven
 Grok workers do not receive a startup model turn.
+
+## Publishing rebased branches
+
+`prepare_publish` detects when the destination tip is not an ancestor of the
+proposed HEAD. For branches with a unique common ancestor, it prepares an explicit
+history-replacement review. The HTML includes the net diff from the old remote tip,
+every outgoing commit, and every old commit that will no longer be reachable from
+that branch. Rewritten commits may preserve those changes with different IDs.
+The confirmation identifies the replacement and the number of removed commits;
+a successful report upload does not authorize a push.
+
+After confirmation, Riftjack rechecks HEAD, the destination URL and its exact tip.
+It pushes the reviewed SHA with an explicit `--force-with-lease` for that branch
+and old tip, so an intervening remote update rejects the push. It never retries a
+failed push automatically. Outgoing and removed history share the 100-commit and
+8 MiB text limits; unrelated histories are rejected. Uncommitted files and tags
+remain excluded. The report-only CLI exposes `historyReplacement` and
+`removedCommits` alongside its existing metadata and never pushes.
