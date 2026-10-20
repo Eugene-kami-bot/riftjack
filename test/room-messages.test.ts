@@ -26,7 +26,8 @@ test('room sends reject malformed input, extra authority fields and oversized Un
   let calls = 0;
   const action = roomMessageDelivery(async () => { calls++; return '{}'; });
   for (const input of [null, [], {}, { action: 'list', room: '!shared:test' },
-    { ...request, sender: '@other:test' }, { ...request, mentions: ['@bot:test'] },
+    { ...request, sender: '@other:test' }, { ...request, mentions: [] },
+    { ...request, mentions: ['invalid'] }, { ...request, mentions: ['@bot:test'], mention: false },
     { ...request, text: ' ' }, { ...request, text: '界'.repeat(2667) },
     { ...request, room: 'somewhere' }, { ...request, id: '' }]) await assert.rejects(action(input, signal));
   assert.equal(calls, 0);

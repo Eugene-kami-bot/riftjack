@@ -22,14 +22,21 @@ It is not meant for copying shared conversations there. The chat must still be
 an encrypted DM with only the human and the bot; mentions are refused there.
 
 Text is literal, limited to 8000 UTF-8 bytes, and carries no private thread
-references. With `mention: true` it also starts the other agent of that room,
-paid with one unit of [peer credit](#peer-mentions); such text is limited to
+references. With `mentions: ["@reviewer:example.com", "@tester:example.com"]` it also starts the selected agents of that room,
+paid with one unit of [peer credit](#peer-mentions) per distinct recipient; such text is limited to
 6000 bytes so that the started turn can quote it whole. This lets an agent
 that received a task in its private chat hand it to its peer. Reusing an ID with identical content during the same
 turn returns the earlier result, including a failure, without sending again.
 IDs are scoped to one turn; never automatically retry an uncertain delivery with
 a new ID or in a later turn. Inspect the destination first. The tool expires when
 the turn ends and permits at most 32 distinct message attempts per turn.
+
+For a room with exactly two agents, `mention: true` selects the sole peer.
+In larger rooms, supply `mentions` with explicit Matrix IDs; do not combine the
+two fields. `action: "list"` includes an `agents` array for each shared room so
+recipients can be selected without guessing. Each distinct recipient costs one
+peer credit; insufficient credit rejects the whole recipient set. All recipients
+receive the sender's remainder after paying for the whole set.
 
 ## Shared-room attachments
 
@@ -92,17 +99,18 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
   "version": 1,
   "agents": [
     {"bot":"@builder:example.com", "owner":"@alice:example.com", "home":"!builder-dm:example.com", "session":"existing-builder-session"},
-    {"bot":"@reviewer:example.com", "owner":"@alice:example.com", "home":"!reviewer-dm:example.com", "session":"existing-reviewer-session"}
+    {"bot":"@reviewer:example.com", "owner":"@alice:example.com", "home":"!reviewer-dm:example.com", "session":"existing-reviewer-session"},
+    {"bot":"@tester:example.com", "owner":"@alice:example.com", "home":"!tester-dm:example.com", "session":"existing-tester-session"}
   ],
   "rooms": [
-    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com"]}
+    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com", "@tester:example.com"]}
   ]
 }
 ```
 
 Create the shared Matrix room with encryption, invite-only access and history
-visibility **joined**, then invite the owner and the two bots. Restart the
-connector. Shared-room processing requires all three participants to have joined
+visibility **joined**, then invite the owner and all configured bots (at least two). Restart the
+connector. Shared-room processing requires all configured participants to have joined
 and no extra joined, invited or knocking participant. An optional `observers` array
 on a room lists additional exact Matrix IDs, such as a command executor and its
 host owner. These participants must also have joined. Their text and attachments
@@ -123,14 +131,14 @@ replacing a session requires an explicit configuration change. Linking grants
 no access to another agent's workspace or private conversation.
 
 For agents in separate installations, put only the local agent in each
-installation's `agents` array, with the same owner and group in `rooms`. Both
+installation's `agents` array, with the same owner and group in `rooms`. All
 installations need this feature and retain their own agent's session. Do not run
 the same agent session in two connectors.
 
 ## Messages and turns
 
 - A Matrix **@mention** addresses one agent. An unaddressed human message in the
-  shared room addresses both. Plain text spelling a display name is not a mention.
+  shared room addresses all configured agents. Plain text spelling a display name is not a mention.
 - In the shared room an agent may answer a human message with exactly
   `NO_REPLY`, for example when it addresses the other agent; nothing is sent
   then. Command results are always sent. Ordinary turns in both shared and
@@ -168,13 +176,13 @@ messages for which the bot has no decryption keys cannot be recovered.
 
 ## Peer mentions
 
-An agent can wake the other agent in the shared room to deliver a requested
+An agent can wake selected other agents in the shared room to deliver a requested
 result or ask for a response. For example, a completed review should mention the
 agent waiting for it, even when no reply is needed. Merely naming the agent or
 linking its profile does not start its turn. No acknowledgement is necessary just
 to end an exchange.
 
-To wake the other agent, append one block to the final reply:
+To wake selected other agents, append one block to the final reply:
 
 ````text
 ```matrix-mentions
@@ -182,7 +190,7 @@ To wake the other agent, append one block to the final reply:
 ```
 ````
 
-The connector removes the block, checks that each recipient is the other agent
+The connector removes the block, checks that each recipient is another configured agent
 of this room, and sends the reply with `m.mentions` and a visible pill on its
 last part, after any attachments. Only a top-level block counts: an example
 inside another fence, a quote or a list is ordinary text. An invalid block sends
@@ -210,10 +218,10 @@ A received mention starts a separate turn for the mentioned agent:
   avoid answering twice. After a failed earlier turn the notice is unchanged.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Starting the peer costs **peer credit**. Each local agent has a reserve of at
-  most 5. A newly accepted human message restores it to 5. Each outgoing mention
+  most 5. A newly accepted human message restores it to 5. Each distinct recipient of an outgoing mention
   costs one; the recipient keeps the larger of its own reserve and the sender's
-  remainder, never the sum. For example, sending twice from a reserve of 5 passes
-  4 and then 3. A recipient that already has 5 keeps 5, even when passed zero.
+  remainder, never the sum. For example, sending twice to one recipient from a reserve of 5 passes
+  4 and then 3; mentioning two recipients at once passes 3 to each. A recipient that already has 5 keeps 5, even when passed zero.
   There is no per-turn or per-chain credit: all rooms share the agent's reserve.
 - A reserve expires one day after its originating human input; forwarding does
   not renew it. Hosts should keep their clocks synchronized (one minute of
@@ -257,3 +265,7 @@ The latter stores shared observations and read positions with private filesystem
 permissions. A changed group does not reuse another membership's observation log.
 
 [Chat commands](chat.md) · [Back to Riftjack](../README.md)
+
+Multi-recipient messages carry a separate credit grant for each recipient. All
+installations participating in such a room must support multi-recipient grants.
+Single-recipient messages retain the existing grant format.

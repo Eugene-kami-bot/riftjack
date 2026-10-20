@@ -47,7 +47,15 @@ test('room MCP advertises mention and passes it through validated', async t => {
   // A mentioning text must fit whole into the notice that quotes it.
   const long = (await (await post(server, 3, { ...request, id: 'long', text: 'x'.repeat(7000), mention: true })).json()).result;
   assert.equal(long.isError, true);
-  assert.deepEqual(requests, [{ ...request, mention: true }]);
+  const mentions = ['@first:test', '@second:test'];
+  assert.equal(tools[0].inputSchema.properties.mentions.type, 'array');
+  const group = { ...request, id: 'group', mentions };
+  assert.equal((await (await post(server, 4, group)).json()).result.isError, undefined);
+  for (const [i, invalid] of [
+    { ...group, mention: true }, { ...group, mentions: [] },
+    { ...group, mentions: ['@invalid'] }, { ...group, text: 'x'.repeat(7000) },
+  ].entries()) assert.equal((await (await post(server, 10 + i, invalid)).json()).result.isError, true);
+  assert.deepEqual(requests, [{ ...request, mention: true }, group]);
 });
 
 test('room MCP passes attachment retrieval and outbox file sends through validation', async t => {

@@ -1,12 +1,12 @@
 import { PublicError } from './errors.js';
-import type { ConversationLinks } from './conversation-links.js';
+import { PEER_CREDIT, type ConversationLinks } from './conversation-links.js';
 import { GRANT, type MatrixEvent } from './bridge.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { isMedia, outgoingAttachments, type IncomingAttachment, type OutgoingAttachment } from './media.js';
 
-// mention: also start the other agent of that shared room, paid with peer credit.
+// Use explicit recipients in groups; mention=true selects the sole peer in a pair room.
 export type MessageRequest = { action: 'list' }
-  | { action: 'send'; room: string; text: string; id: string; mention?: boolean }
+  | { action: 'send'; room: string; text: string; id: string; mention?: boolean; mentions?: string[] }
   | { action: 'receive_attachment'; room: string; event_id: string }
   | { action: 'send_files'; room: string; id: string; files: { path: string; name?: string }[]; outbox: string };
 export type MessageAction = (request: MessageRequest, signal: AbortSignal) => Promise<string>;
@@ -16,7 +16,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
   context: { event: MatrixEvent; key: string }, transport: {
     allowed(room: string, sender: string): Promise<boolean>;
     stopping(): boolean;
-    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> }): Promise<string>;
+    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> | ReturnType<ConversationLinks['reserveMentions']> }): Promise<string>;
     read?(room: string, eventId: string): Promise<MatrixEvent | undefined>;
     receive?(event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>): Promise<IncomingAttachment>;
     maxBytes?: number;
@@ -35,9 +35,10 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       signal.throwIfAborted();
     };
     if (request.action === 'list') {
-      const rooms: { room: string; type: 'shared' | 'private' }[] = [];
+      const rooms: { room: string; type: 'shared' | 'private'; agents?: string[] }[] = [];
       for (const target of [...links.sharedRooms(bot), ...home ? [home] : []]) {
-        try { await allowed(target); rooms.push({ room: target, type: target === home ? 'private' : 'shared' }); }
+        try { await allowed(target); rooms.push({ room: target, type: target === home ? 'private' : 'shared',
+          ...(target !== home && { agents: [...links.room(bot, target)!.bots] }) }); }
         catch { signal.throwIfAborted(); }
       }
       return JSON.stringify({ rooms });
@@ -65,16 +66,19 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       const result = await delivery.action({ files: request.files }, signal);
       return JSON.stringify({ room: request.room, ...JSON.parse(result) });
     }
-    if (request.mention && request.room === home) throw new PublicError('Room message withheld: mention is only for the other agent of a shared room.');
-    // The mention is paid now; its grant lets the peer start exactly once.
-    const peer = request.mention ? links.room(bot, request.room)!.bots.find(id => id !== bot) : undefined;
-    const grant = request.mention ? links.reserve(bot, request.room) : undefined;
-    if (request.mention && !grant) throw new PublicError('Room message withheld: no peer credit is left for a mention. It is restored when the human next writes to you; send without mention instead.');
+    const peers = links.room(bot, request.room)?.bots.filter(id => id !== bot) ?? [];
+    if ((request.mention || request.mentions?.length) && request.room === home) throw new PublicError('Room message withheld: mentions are only for other agents of a shared room.');
+    if (request.mention && request.mentions !== undefined) throw new PublicError('Choose mention or mentions, not both.');
+    if (request.mention && peers.length !== 1) throw new PublicError('Select recipients with mentions in a room with more than two agents.');
+    const recipients = request.mention ? peers : [...new Set(request.mentions ?? [])];
+    if (!recipients.every(id => peers.includes(id))) throw new PublicError('Only other agents of this shared room can be mentioned.');
+    const grants = recipients.length ? links.reserveMentions(bot, request.room, recipients) : undefined;
+    if (recipients.length && !grants) throw new PublicError('Room message withheld: no peer credit is available for all recipients. It is restored when the human next writes to you; select fewer recipients or send without mention.');
     // Use the running client's encryption state. Do not inherit private thread
     // relations, approvals or a human origin from the source room.
     const eventId = await transport.send(request.room, {
-      msgtype: 'm.text', body: peer ? request.text + '\n\n' + peer : request.text, 'm.mentions': { user_ids: peer ? [peer] : [] },
-      ...(grant && { [GRANT]: grant }),
+      msgtype: 'm.text', body: recipients.length ? request.text + '\n\n' + recipients.join(' ') : request.text, 'm.mentions': { user_ids: recipients },
+      ...(grants && { [GRANT]: grants.length === 1 ? grants[0] : grants }),
     });
     // Record executor correlation before returning the tool result, without
     // depending on a later sync echo (which may arrive after a fast completion).
@@ -111,14 +115,18 @@ export function roomMessageDelivery(send: MessageAction): RoomMessageTool {
       const files = r.files.map(file => ({ path: file.path as string, ...(file.name !== undefined && { name: file.name as string }) }));
       return attempt(r.id, { action: 'send_files', room: r.room as string, id: r.id, files, outbox }, signal);
     }
-    if (r.action !== 'send' || Object.keys(r).some(k => !['action', 'room', 'text', 'id', 'mention'].includes(k)) ||
+    if (r.action !== 'send' || Object.keys(r).some(k => !['action', 'room', 'text', 'id', 'mention', 'mentions'].includes(k)) ||
         typeof r.room !== 'string' || !/^![^\s:]+:[^\s]+$/.test(r.room) ||
-        typeof r.text !== 'string' || !r.text.trim() || Buffer.byteLength(r.text, 'utf8') > (r.mention ? 6000 : 8000) ||
-        typeof r.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(r.id) || (r.mention !== undefined && typeof r.mention !== 'boolean')) {
+        typeof r.text !== 'string' || !r.text.trim() || Buffer.byteLength(r.text, 'utf8') > (r.mention || r.mentions !== undefined ? 6000 : 8000) ||
+        typeof r.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(r.id) || (r.mention !== undefined && typeof r.mention !== 'boolean') ||
+        (r.mentions !== undefined && (!Array.isArray(r.mentions) || !r.mentions.length || r.mentions.length > PEER_CREDIT ||
+          !r.mentions.every(id => typeof id === 'string' && /^@[^\s:]+:[^\s]+$/.test(id)))) ||
+        (r.mention !== undefined && r.mentions !== undefined)) {
       // A mentioning message must fit whole into the notice that quotes it.
-      throw new PublicError('Use action=list, or action=send with room, text (up to 8000 UTF-8 bytes, or 6000 with mention), a unique id (letters, digits, underscore or hyphen; up to 80 characters) and optional mention (true to start the other agent).');
+      throw new PublicError('Use action=list, or action=send with room, text (up to 8000 UTF-8 bytes, or 6000 with mention), a unique id (letters, digits, underscore or hyphen; up to 80 characters) and optional mentions (recipient Matrix IDs), or mention=true for a two-agent room.');
     }
-    const request: MessageRequest = { action: 'send', room: r.room, text: r.text, id: r.id, ...(r.mention && { mention: true }) };
+    const request: MessageRequest = { action: 'send', room: r.room, text: r.text, id: r.id, ...(r.mention && { mention: true }),
+      ...(r.mentions !== undefined && { mentions: [...r.mentions as string[]] }) };
     return attempt(r.id, request, signal);
   };
   function attempt(id: string, request: MessageRequest, signal: AbortSignal) {

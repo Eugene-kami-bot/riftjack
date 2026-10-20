@@ -10,7 +10,7 @@ import { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 export { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 
 type Agent = { bot: string; owner: string; home: string; session: string; thread?: string };
-type Room = { room: string; owner: string; bots: [string, string]; observers?: string[]; executors?: string[] };
+type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[] };
 type Configuration = { version: 1; agents: Agent[]; rooms: Room[] };
 type Entry = { seq: number; id: string; sender: string; role: 'human' | 'agent' | 'participant'; body: string; type: string; reply?: string };
 type Cursor = { seq: number; offset: number };
@@ -89,9 +89,9 @@ export class ConversationLinks {
       throw new PublicError('Each linked agent must own a distinct session.');
     }
     for (const room of c.rooms) {
-      if (!matrixRoom(room.room) || room.owner !== owner || !Array.isArray(room.bots) || room.bots.length !== 2 ||
+      if (!matrixRoom(room.room) || room.owner !== owner || !Array.isArray(room.bots) || room.bots.length < 2 ||
           !room.bots.every(matrixUser) || (room.observers !== undefined && (!Array.isArray(room.observers) || !room.observers.every(matrixUser))) || !unique(roomMembers(room)) || c.agents.some(a => a.home === room.room) ||
-          !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and two distinct agents, including a linked local agent.');
+          !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and at least two distinct agents, including a linked local agent.');
       if (room.executors !== undefined && (!Array.isArray(room.executors) || !room.executors.every(id => matrixUser(id) && room.observers?.includes(id)) || !unique(room.executors))) throw new PublicError('Executors must be distinct configured observers.');
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
@@ -115,18 +115,26 @@ export class ConversationLinks {
     const credit = this.credits.agents[bot];
     return credit && validCreditTime(credit.since, now) ? credit.level : 0;
   }
-  // Spends one credit for a mention of the room's other agent while the message
-  // is being prepared. Returns the bounded wire grant, or nothing.
+  // Pair-room convenience. Larger groups must select their recipients explicitly.
   reserve(bot: string, room: string, now = Date.now()): WireGrant | undefined {
-    const shared = this.room(bot, room), peer = shared?.bots.find(id => id !== bot), have = this.peerCredit(bot, now);
-    if (!peer || have < 1) return;
-    const since = this.credits.agents[bot].since, id = randomUUID();
-    const wire: WireGrant = { version: 1, id, from: bot, to: peer, room, since, remaining: have - 1 };
-    this.credits.agents[bot] = { level: have - 1, since };
+    const peers = this.room(bot, room)?.bots.filter(id => id !== bot);
+    if (peers?.length !== 1) return;
+    return this.reserveMentions(bot, room, peers, now)?.[0];
+  }
+  // Reserve the whole recipient set atomically, charging once per distinct peer.
+  // Each recipient gets the same final remainder, regardless of delivery order.
+  reserveMentions(bot: string, room: string, recipients: string[], now = Date.now()): WireGrant[] | undefined {
+    const shared = this.room(bot, room), peers = [...new Set(recipients)], have = this.peerCredit(bot, now);
+    if (!shared || !peers.length || peers.length > have || !peers.every(id => id !== bot && shared.bots.includes(id))) return;
+    const since = this.credits.agents[bot].since, remaining = have - peers.length;
+    const wires: WireGrant[] = peers.map(to => ({ version: 1, id: randomUUID(), from: bot, to, room, since, remaining }));
+    this.credits.agents[bot] = { level: remaining, since };
     this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, g]) => now - g.since < CREDIT_TTL_MS).slice(-99));
-    if (this.agent(peer)) this.credits.grants[id] = { from: bot, to: peer, room, level: have - 1, since, wire };
+    for (const wire of wires) if (this.agent(wire.to)) {
+      this.credits.grants[wire.id] = { from: bot, to: wire.to, room, level: remaining, since, wire };
+    }
     this.saveHistory();
-    return wire;
+    return wires;
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
@@ -222,7 +230,10 @@ export class ConversationLinks {
     if (mentioned.includes(event.event_id)) return;
     log.mentioned[bot] = [...mentioned, event.event_id].slice(-1000);
     // A wire grant starts its recipient once, including on a separate installation.
-    const now = Date.now(), wire = content[GRANT] as WireGrant | undefined;
+    const now = Date.now(), raw = content[GRANT];
+    const wires = (Array.isArray(raw) ? raw : [raw]) as (WireGrant | undefined)[];
+    const matches = wires.length <= PEER_CREDIT ? wires.filter(w => w && w.to === bot) : [];
+    const wire = matches.length === 1 ? matches[0] : undefined;
     const valid = !!wire && typeof wire === 'object' && wire.version === 1 &&
       typeof wire.id === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(wire.id) &&
       wire.from === event.sender && wire.to === bot && wire.room === room &&
@@ -273,8 +284,9 @@ export class ConversationLinks {
     const error = blocks.length > 1 ? 'Mention not sent: use a single matrix-mentions block.'
       : rest.length > MENTION_REPLY_LIMIT ? `Mention not sent: a reply that mentions another agent must be at most ${MENTION_REPLY_LIMIT} characters.`
       : !Array.isArray(to) || !to.length || !to.every(id => typeof id === 'string') ? 'Mention not sent: the matrix-mentions block needs JSON like {"to":["@agent:example.com"]}.'
-      : !to.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only the other agent in this shared room can be mentioned.'
-      : this.peerCredit(bot) < 1 ? 'Mention not sent: no peer credit is left. It is restored when the human next writes to you.' : undefined;
+      : !to.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only other agents in this shared room can be mentioned.'
+      : this.peerCredit(bot) < 1 ? 'Mention not sent: no peer credit is left. It is restored when the human next writes to you.'
+      : new Set(to as string[]).size > this.peerCredit(bot) ? 'Mention not sent: insufficient peer credit for all recipients; select fewer agents.' : undefined;
     if (error) { this.note(bot, room, error); return { text: rest, mentions: [], error }; }
     return { text: rest, mentions: [...new Set(to as string[])] };
   }
@@ -290,11 +302,11 @@ export class ConversationLinks {
   // A mention is paid here, as the message is sent; without credit left it is
   // sent without the mention.
   outgoing<T extends { msgtype?: string }>(bot: string, room: string, content: T, mentions?: string[], reply?: string):
-    T & { [REPLY]?: string; [GRANT]?: WireGrant; 'm.mentions'?: { user_ids: string[] } } {
+    T & { [REPLY]?: string; [GRANT]?: WireGrant | WireGrant[]; 'm.mentions'?: { user_ids: string[] } } {
     if (!this.room(bot, room)) return content;
-    const grant = mentions?.length ? this.reserve(bot, room) : undefined;
+    const grants = mentions?.length ? this.reserveMentions(bot, room, mentions) : undefined;
     return { ...content, ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),
-      ...(grant && { 'm.mentions': { user_ids: mentions! }, [GRANT]: grant }) };
+      ...(grants && { 'm.mentions': { user_ids: grants.map(g => g.to) }, [GRANT]: grants.length === 1 ? grants[0] : grants }) };
   }
   private saveHistory() {
     writeFileSync(this.historyFile + '.tmp', JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits }), { mode: 0o600 });

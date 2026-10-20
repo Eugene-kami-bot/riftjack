@@ -211,7 +211,7 @@ test('outbound room messages enforce destination privacy and session binding wit
       return '$sent';
     },
   });
-  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [{ room: group, type: 'shared' }] });
+  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [{ room: group, type: 'shared', agents: [bot, peer] }] });
   const send = (room = group) => action({ action: 'send', room, text: 'Public result.', id: 'one' }, signal);
   assert.equal(JSON.parse(await send()).event_id, '$sent');
   for (const room of [home, '!unlisted:test']) await assert.rejects(send(room));
@@ -236,11 +236,11 @@ test('an agent can return a result to its own private chat, but not mention anyo
     allowed: (room, sender) => f.links.allowed(bot, room, sender, async () => room === home ? (homePrivate ? privateState : roomState()) : roomState()),
     send: async (room, content) => { sent.push([room, content]); return '$sent'; },
   });
-  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)).rooms, [{ room: group, type: 'shared' }, { room: home, type: 'private' }]);
+  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)).rooms, [{ room: group, type: 'shared', agents: [bot, peer] }, { room: home, type: 'private' }]);
   await action({ action: 'send', room: home, text: 'The reviewer found nothing.', id: 'result' }, signal);
   assert.deepEqual(sent, [[home, { msgtype: 'm.text', body: 'The reviewer found nothing.', 'm.mentions': { user_ids: [] } }]]);
   f.links.credit(bot);
-  await assert.rejects(action({ action: 'send', room: home, text: 'Wake?', id: 'wake', mention: true }, signal), /only for the other agent/);
+  await assert.rejects(action({ action: 'send', room: home, text: 'Wake?', id: 'wake', mention: true }, signal), /only for other agents/);
   // A private chat that gained another member is no longer a destination.
   homePrivate = false;
   await assert.rejects(action({ action: 'send', room: home, text: 'Leak?', id: 'leak' }, signal), /withheld/);
