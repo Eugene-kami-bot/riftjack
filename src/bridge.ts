@@ -53,7 +53,7 @@ type Options = {
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>) => Promise<IncomingAttachment>;
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
-  acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
+  resolveManagerAvatar?: (prompt: string, sender: string) => string | false;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
   tasks?: (room: string, event: MatrixEvent, key: string, options: { history: boolean; page: number }) => string;
@@ -106,6 +106,7 @@ export class Bridge {
   private recoveryNotes = new Set<string>();
   private restartNotice?: { room: string; event: MatrixEvent; key: string; session: string };
   private admission = Promise.resolve();
+  private avatarUploads = new Map<string, { prompt: string; sender: string; expires: number }>();
   constructor(private options: Options) {}
   private deliver<T>(room: string, send: () => Promise<T>): Promise<T> {
     const typing = this.active?.room === room ? this.active.typing : undefined;
@@ -115,8 +116,9 @@ export class Bridge {
     return this.deliver(args[0], () => this.options.reply(...args));
   }
   get busy(): boolean { return !!this.active || this.draining || (!!(this.options.linkedSession || this.options.recoverMessages) && this.options.state.queued(this.options.botId) > 0); }
-  stop() { this.stopped = true; this.active?.controller.abort(); }
+  stop() { this.avatarUploads.clear(); this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) {
+    for (const [key, upload] of this.avatarUploads) if (upload.sender === sender) this.avatarUploads.delete(key);
     if (this.restartNotice?.event.sender === sender) this.restartNotice = undefined;
     if (this.active?.sender === sender) this.active.controller.abort();
   }
@@ -235,7 +237,7 @@ export class Bridge {
     if (event.content?.['m.relates_to']?.rel_type === 'm.replace') return;
     const body = !media && event.content?.['m.relates_to']?.['m.in_reply_to']
       ? event.content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : event.content?.body;
-    const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
+    let prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
     if (background) {
       if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
@@ -266,6 +268,36 @@ export class Bridge {
       await reply(saved ? 'The connector is restarting or stopping. Your message will be recovered after restart.'
         : 'The connector is restarting or stopping. Please retry in a few seconds.');
       return;
+    }
+    if (o.kind === 'manager') {
+      for (const [uploadKey, upload] of this.avatarUploads) {
+        if (upload.expires <= Date.now()) this.avatarUploads.delete(uploadKey);
+      }
+      const pending = this.avatarUploads.get(key);
+      // Only the next message from this sender in this room/thread can use it.
+      this.avatarUploads.delete(key);
+      if (!media && verb === 'cancel' && pending && !this.active) {
+        await reply('Avatar upload cancelled.'); return;
+      }
+      try {
+        if (!media && /^set avatar(?:\s|$)/i.test(prompt)) {
+          const resolved = o.resolveManagerAvatar?.(prompt, event.sender);
+          if (resolved) {
+            if (this.active) { await reply('A task is running. Wait for it to finish, then send the avatar command again.'); return; }
+            this.avatarUploads.set(key, { prompt: resolved, sender: event.sender, expires: Date.now() + 5 * 60_000 });
+            await reply('Send one PNG, JPEG, GIF or WebP image in this conversation within 5 minutes. No caption is needed. '
+              + 'It will become the bot’s public profile avatar. Any other message cancels this request; use !cancel to cancel explicitly.');
+            return;
+          }
+        }
+        if (event.content?.msgtype === 'm.image' && pending && !/^set avatar(?:\s|$)/i.test(prompt)) {
+          // Resolve the pinned Matrix ID again: permissions may have changed.
+          prompt = pending.prompt;
+        }
+      } catch (error) {
+        if (!(error instanceof PublicError)) throw error;
+        await reply(error.message); return;
+      }
     }
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
       const current = this.active;
@@ -305,8 +337,8 @@ export class Bridge {
     }
     if (media && o.kind === 'manager') {
       try {
-        if (event.content?.msgtype !== 'm.image' || !o.acceptManagerAvatar?.(prompt, event.sender)) {
-          await reply('The manager only accepts avatar images: use set avatar <bot name> as the caption. Only the connector owner or bot creator can change its profile. Send other files to a Codex or Claude bot.'); return;
+        if (event.content?.msgtype !== 'm.image' || !o.resolveManagerAvatar?.(prompt, event.sender)) {
+          await reply('To set an avatar, send set avatar <bot name>, then send an image. You can also use the command as the image caption. Only the connector owner or bot creator can change its profile. Send other files to a Codex or Claude bot.'); return;
         }
       } catch (error) {
         if (!(error instanceof PublicError)) throw error;

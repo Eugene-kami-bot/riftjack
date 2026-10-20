@@ -58,9 +58,9 @@ for (const end of ['failure', 'cancel', 'stop'] as const) test(`typing clears af
 test('manager accepts avatar names and reports target errors before downloading images', async t => {
   let accounts!: Accounts, downloads = 0;
   const f = fixture(t, 'manager', undefined, true, {
-    acceptManagerAvatar: (prompt, sender) => {
+    resolveManagerAvatar: (prompt, sender) => {
       const request = parseProfileRequest(prompt);
-      return request?.action === 'avatar' && !!resolveProfileTarget(accounts, request.userId, sender, '@owner:test');
+      return request?.action === 'avatar' && 'set avatar ' + resolveProfileTarget(accounts, request.userId, sender, '@owner:test').userId;
     },
     receive: async () => { downloads++; return { path: '/avatar.png', name: 'avatar.png', mimetype: 'image/png', image: true, size: 1 }; },
   });
@@ -382,7 +382,7 @@ test('manager downloads only explicitly accepted avatar images and rejects other
     assert.equal(attachments?.length, 1);
     return 'avatar updated';
   }, true, {
-    acceptManagerAvatar: (prompt, sender) => prompt === 'set avatar @target:test' && sender === '@owner:test',
+    resolveManagerAvatar: (prompt, sender) => prompt === 'set avatar @target:test' && sender === '@owner:test' && prompt,
     receive: async () => { downloads++; return { path: '/avatar.png', name: 'avatar.png', image: true, size: 10, mimetype: 'image/png' }; },
   });
   for (const [index, body] of ['create a Codex bot called Surprise', 'rename bot @target:test to Surprise', '!restart', 'set avatar @other:test'].entries()) {
@@ -396,6 +396,62 @@ test('manager downloads only explicitly accepted avatar images and rejects other
   assert.equal(downloads, 1); assert.equal(runs, 1);
   assert.equal(f.replies.at(-1), 'avatar updated');
 });
+
+test('manager accepts a separate avatar upload once, pinned to the selected account', async t => {
+  let target = '@original:test';
+  const f = fixture(t, 'manager', undefined, true, {
+    resolveManagerAvatar: prompt => prompt === 'set avatar Example' ? 'set avatar ' + target
+      : prompt === 'set avatar @original:test' ? prompt : false,
+    receive: async () => ({ path: '/avatar.png', name: 'avatar.png', image: true, size: 1, mimetype: 'image/png' }),
+  });
+  await f.bridge.handle('!dm:test', event('set avatar Example', '$select'));
+  assert.equal(f.calls.length, 0);
+  assert.match(f.replies.at(-1)!, /No caption is needed/);
+  target = '@replacement:test'; // A rename must not redirect the selected upload.
+  const image = { ...event('', '$image'), content: { msgtype: 'm.image', body: 'photo.png' } };
+  await f.bridge.handle('!dm:test', image);
+  assert.deepEqual(f.calls, ['manager:set avatar @original:test']);
+  await f.bridge.handle('!dm:test', image);
+  await f.bridge.handle('!dm:test', { ...image, event_id: '$another' });
+  assert.equal(f.calls.length, 1);
+});
+
+test('pending avatar uploads are scoped to sender, room and thread', async t => {
+  let downloads = 0;
+  const f = fixture(t, 'manager', undefined, true, {
+    isAuthorized: () => true,
+    resolveManagerAvatar: prompt => prompt === 'set avatar @target:test' && prompt,
+    receive: async () => { downloads++; return { path: '/avatar.png', name: 'avatar.png', image: true, size: 1, mimetype: 'image/png' }; },
+  });
+  await f.bridge.handle('!dm:test', event('set avatar @target:test', '$select'));
+  const image = { ...event('', '$image'), content: { msgtype: 'm.image', body: 'photo.png' } };
+  await f.bridge.handle('!other:test', { ...image, event_id: '$room' });
+  await f.bridge.handle('!dm:test', { ...image, event_id: '$sender', sender: '@other:test' });
+  await f.bridge.handle('!dm:test', { ...image, event_id: '$thread', content: { ...image.content,
+    'm.relates_to': { rel_type: 'm.thread', event_id: '$root' } } });
+  assert.equal(downloads, 0);
+  await f.bridge.handle('!dm:test', image);
+  assert.equal(downloads, 1);
+});
+
+for (const end of ['cancel', 'text', 'audio', 'expired', 'revoked', 'permission'] as const) {
+  test(`manager does not use a pending avatar after ${end}`, async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    let allowed = true, downloads = 0;
+    const f = fixture(t, 'manager', undefined, true, {
+      resolveManagerAvatar: prompt => allowed && prompt === 'set avatar @target:test' && prompt,
+      receive: async () => { downloads++; return { path: '/avatar.png', name: 'avatar.png', image: true, size: 1, mimetype: 'image/png' }; },
+    });
+    await f.bridge.handle('!dm:test', event('set avatar @target:test', '$select'));
+    if (end === 'cancel' || end === 'text') await f.bridge.handle('!dm:test', event(end === 'cancel' ? '!cancel' : 'list bots', '$interrupt'));
+    if (end === 'audio') await f.bridge.handle('!dm:test', { ...event('', '$audio'), content: { msgtype: 'm.audio', body: 'voice.ogg' } });
+    if (end === 'expired') t.mock.timers.tick(5 * 60_000);
+    if (end === 'revoked') f.bridge.revoke('@owner:test');
+    if (end === 'permission') allowed = false;
+    await f.bridge.handle('!dm:test', { ...event('', '$image'), content: { msgtype: 'm.image', body: 'photo.png' } });
+    assert.equal(downloads, 0);
+  });
+}
 
 test('cancellation during attachment download does not invoke Codex', async t => {
   let started!: () => void;

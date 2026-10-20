@@ -343,9 +343,9 @@ async function main() {
         thread: event.content?.['m.relates_to']?.rel_type === 'm.thread' ? event.content['m.relates_to'].event_id : undefined }, options) : undefined,
       usage: account.kind === 'claude' ? async signal => formatClaudeUsage(await claudeUsage(botConfig, signal))
         : account.kind === 'codex' ? signal => codexUsage(botConfig, signal) : undefined,
-      acceptManagerAvatar: (prompt, sender) => {
+      resolveManagerAvatar: (prompt, sender) => {
         const request = parseProfileRequest(prompt);
-        return request?.action === 'avatar' && !!resolveProfileTarget(accounts, request.userId, sender, access.owner);
+        return request?.action === 'avatar' && 'set avatar ' + resolveProfileTarget(accounts, request.userId, sender, access.owner).userId;
       },
       async run(mode, prompt, key, signal, sender, attachments, interact, publish, hooks) {
         // Coding bots never interpret account-management commands.
