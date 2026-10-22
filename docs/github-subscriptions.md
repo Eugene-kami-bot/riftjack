@@ -113,7 +113,14 @@ Polling is serialized per bot. Requests sharing a credentials directory wait for
 the preceding response and start at least one second apart. GitHub rate-limit
 headers delay all subsequent requests, including those already queued by other
 bots. Cancelling a queued request does not release later requests early. Different
-credentials directories have independent queues.
+credentials directories have independent queues. Secondary rate limits (HTTP 429,
+or HTTP 403 identifying a secondary rate limit or abuse detection) pause that
+shared queue for at least one minute, doubling on repeated throttling up to one
+hour. A longer `Retry-After` or primary-limit reset takes precedence. A successful
+response resets the secondary backoff. Ordinary permission errors do not trigger
+this shared cooldown. Rate-limit errors report the shared pause deadline without
+including the API response body. Queue deadlines are in memory and reset when
+Riftjack restarts.
 Failures use exponential backoff up to one hour. `list` exposes the last successful
 poll, last error and next scheduled poll. Three consecutive failures also attempt
 to send one diagnostic notice through the background inbox. A full inbox retains

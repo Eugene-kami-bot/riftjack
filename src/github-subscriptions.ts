@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, relative } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
+import timers from 'node:timers/promises';
 import { PublicError } from './errors.js';
 import type { BackgroundTarget, BackgroundTasks } from './background-tasks.js';
 
@@ -37,7 +37,7 @@ export function loadGitHubPolicies(path?: string, workspace?: string): GitHubPol
 }
 
 export type GitHubRead = (endpoint: string, signal: AbortSignal) => Promise<any>;
-type RequestBudget = { tail: Promise<void>; notBefore: number };
+type RequestBudget = { tail: Promise<void>; notBefore: number; secondaryFailures: number };
 const requestBudgets = new Map<string, RequestBudget>();
 
 // Cancellation must not release a queued request's place before its predecessor
@@ -56,14 +56,14 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
   return async (endpoint, signal) => {
     signal.throwIfAborted();
     let budget = requestBudgets.get(policy.ghConfigDir);
-    if (!budget) requestBudgets.set(policy.ghConfigDir, budget = { tail: Promise.resolve(), notBefore: 0 });
+    if (!budget) requestBudgets.set(policy.ghConfigDir, budget = { tail: Promise.resolve(), notBefore: 0, secondaryFailures: 0 });
     const shared = budget;
     const request = shared.tail.then(async () => {
       signal.throwIfAborted();
       // Serialize through the response, not just the start time. A response may
       // postpone every request already queued by other bots sharing credentials.
       while (shared.notBefore > Date.now()) {
-        await sleep(Math.min(shared.notBefore - Date.now(), 2_147_483_647), undefined, { signal });
+        await timers.setTimeout(Math.min(shared.notBefore - Date.now(), 2_147_483_647), undefined, { signal });
       }
       signal.throwIfAborted();
       shared.notBefore = Date.now() + 1000;
@@ -79,11 +79,35 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
             const retry = Number(/^retry-after:\s*(\d+)/im.exec(headers)?.[1]);
             const remaining = /^x-ratelimit-remaining:\s*(\d+)/im.exec(headers)?.[1];
             const reset = Number(/^x-ratelimit-reset:\s*(\d+)/im.exec(headers)?.[1]);
-            if (retry > 0 || (remaining === '0' && reset > 0)) {
-              const resume = Math.max(Date.now() + (Number.isFinite(retry) ? retry * 1000 : 0), remaining === '0' ? reset * 1000 : 0);
+            const status = Number(/^HTTP\/\S+\s+(\d{3})/i.exec(headers)?.[1]);
+            let message = '';
+            try {
+              const response = JSON.parse(body);
+              if (typeof response?.message === 'string') message = response.message;
+            } catch { /* A 429 still establishes throttling without a JSON body. */ }
+            const exhausted = remaining === '0' && reset > 0;
+            const secondary = !exhausted && (status === 429 ||
+              (status === 403 && /secondary rate limit|abuse detection/i.test(message)));
+            if (secondary) {
+              shared.secondaryFailures = Math.min(shared.secondaryFailures + 1, 7);
+              // GitHub requires at least a minute without Retry-After. Keep this
+              // backoff on the shared queue, not just the failed subscription.
+              const delay = Math.min(3_600_000, 60_000 * 2 ** (shared.secondaryFailures - 1));
+              shared.notBefore = Math.max(shared.notBefore, Date.now() + delay);
+            } else if (!error && status >= 200 && status < 300) {
+              shared.secondaryFailures = 0;
+            }
+            if (retry > 0 || exhausted) {
+              const resume = Math.max(Date.now() + (Number.isFinite(retry) ? retry * 1000 : 0), exhausted ? reset * 1000 : 0);
               shared.notBefore = Math.max(shared.notBefore, resume);
             }
-            if (error) { reject(new PublicError('GitHub request failed. Check gh authentication, repository access and API rate limits.')); return; }
+            if (error) {
+              // Do not expose stderr or the untrusted API response body.
+              reject(new PublicError(secondary || exhausted || retry > 0
+                ? `GitHub request failed (HTTP ${status || 'unknown'} rate limit). Requests sharing these credentials are paused until ${new Date(shared.notBefore).toISOString()}.`
+                : 'GitHub request failed. Check gh authentication, repository access and API rate limits.'));
+              return;
+            }
             try { resolve(JSON.parse(body)); } catch { reject(new PublicError('GitHub returned an invalid JSON response.')); }
           });
       });

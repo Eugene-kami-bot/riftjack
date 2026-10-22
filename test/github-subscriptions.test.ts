@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import timers from 'node:timers/promises';
 import { githubReader, GitHubSubscriptions, type GitHubRead } from '../src/github-subscriptions.js';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
 
@@ -59,6 +60,102 @@ if (process.env.GH_CONFIG_DIR === ${JSON.stringify(a)}) {
   const calls = readFileSync(log, 'utf8').trim().split('\n').map(x => JSON.parse(x));
   assert.deepEqual(calls.map(x => x.account), [a, b]);
   assert.ok(calls.every(x => x.args.includes('GET') && x.args.includes('github.com')));
+});
+
+function rateFixture(t: TestContext, responses: Array<{ status: number; headers?: string; message?: string }>) {
+  const dir = mkdtempSync(join(tmpdir(), 'github-secondary-'));
+  const log = join(dir, 'calls');
+  const oldPath = process.env.PATH;
+  const controller = new AbortController();
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 0, 1) });
+  const waits: Array<{ until: number; resolve: () => void }> = [];
+  const delays: number[] = [];
+  t.mock.method(timers, 'setTimeout', (ms: number, value: unknown, options: { signal: AbortSignal }) => {
+    delays.push(ms);
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(options.signal.reason);
+      options.signal.addEventListener('abort', abort, { once: true });
+      waits.push({ until: Date.now() + ms, resolve: () => {
+        options.signal.removeEventListener('abort', abort); resolve(value);
+      } });
+    });
+  });
+  t.after(() => { controller.abort(); process.env.PATH = oldPath; rmSync(dir, { recursive: true, force: true }); });
+  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+const fs = require('node:fs');
+const log = ${JSON.stringify(log)};
+const n = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').length : 0;
+fs.appendFileSync(log, 'x');
+const response = ${JSON.stringify(responses)}[n] || {status:200};
+process.stdout.write('HTTP/2.0 '+response.status+' Test\\n'+(response.headers || '')+'\\n'+JSON.stringify({message:response.message}));
+process.exitCode = response.status >= 400 ? 1 : 0;
+`, { mode: 0o700 });
+  process.env.PATH = dir + ':' + oldPath;
+  const policy = { ghConfigDir: dir, repositories: ['example/project'] };
+  return {
+    read: () => githubReader(policy)('repos/example/project/pulls/1', controller.signal),
+    calls: () => readFileSync(log, 'utf8').length,
+    delays,
+    async tick(ms: number) {
+      // Let queued readers install their sleep before advancing simulated time.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      t.mock.timers.tick(ms);
+      for (const wait of waits.splice(0)) {
+        if (wait.until <= Date.now()) wait.resolve(); else waits.push(wait);
+      }
+      await new Promise<void>(resolve => setImmediate(resolve));
+    },
+  };
+}
+
+for (const scenario of [
+  { name: 'secondary 403', status: 403, message: 'You have exceeded a secondary rate limit.', delay: 60_000 },
+  { name: '429 without a message', status: 429, delay: 60_000 },
+  { name: 'legacy abuse detection', status: 403, message: 'You have triggered an abuse detection mechanism.', delay: 60_000 },
+  { name: 'longer Retry-After', status: 429, headers: 'retry-after: 120\n', delay: 120_000 },
+  { name: 'primary reset', status: 403, headers: 'x-ratelimit-remaining: 0\nx-ratelimit-reset: 1767225780\n', delay: 180_000 },
+]) {
+  test(`${scenario.name} pauses requests already queued by another reader`, async t => {
+    const f = rateFixture(t, [{ ...scenario, headers: scenario.headers ?? 'x-ratelimit-remaining: 4000\n' }]);
+    const first = assert.rejects(f.read(), /HTTP (403|429) rate limit.*paused until/);
+    let complete = false;
+    const queued = f.read().then(() => { complete = true; });
+    void queued.catch(() => {});
+    await first;
+    await f.tick(0);
+    assert.equal(f.delays[0], scenario.delay);
+    await f.tick(scenario.delay - 1);
+    assert.equal(f.calls(), 1);
+    assert.equal(complete, false);
+    await f.tick(1);
+    await queued;
+    assert.equal(f.calls(), 2);
+  });
+}
+
+test('repeated secondary limits increase shared backoff and success resets it', async t => {
+  const limited = { status: 429, headers: 'x-ratelimit-remaining: 4000\n' };
+  const f = rateFixture(t, [limited, limited, { status: 200 }, limited]);
+  await assert.rejects(f.read());
+  const retry = assert.rejects(f.read());
+  await f.tick(60_000); await retry;
+  const success = f.read();
+  await f.tick(119_999); assert.equal(f.calls(), 2);
+  await f.tick(1); await success;
+  const again = assert.rejects(f.read());
+  await f.tick(1000); await again;
+  const recovered = f.read();
+  await f.tick(59_999); assert.equal(f.calls(), 4);
+  await f.tick(1); await recovered;
+  assert.equal(f.calls(), 5);
+});
+
+test('ordinary permission failures do not impose a secondary-limit cooldown', async t => {
+  const f = rateFixture(t, [{ status: 403, message: 'Resource not accessible by integration' }]);
+  await assert.rejects(f.read());
+  const next = f.read();
+  await f.tick(1000); await next;
+  assert.equal(f.calls(), 2);
 });
 
 const target: BackgroundTarget = { room: '!room:example.com', sender: '@alice:example.com', key: 'conversation', session: 'session-1' };
