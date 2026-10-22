@@ -10,9 +10,11 @@ const record = (value: unknown): value is Record<string, any> => !!value && type
 // A task-local Streamable HTTP MCP endpoint. No persistent config, public listener,
 // Matrix credentials or API for approving requests. Each action enforces its own
 // destination scope; exposing this transport never authorizes arbitrary rooms.
-export async function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: { server: string; cancelled: string; failed: string }, options: { maxQueued?: number } = {}): Promise<ToolConnection & { close(): Promise<void> }> {
+export async function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: { server: string; cancelled: string; failed: string }, options: { maxQueued?: number; maxRequestBytes?: number } = {}): Promise<ToolConnection & { close(): Promise<void> }> {
   signal.throwIfAborted();
   const maxQueued = options.maxQueued ?? 0;
+  const maxRequestBytes = options.maxRequestBytes ?? 16_384;
+  if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > 8 * 1024 * 1024) throw new Error('Invalid tool request size limit.');
   if (!Number.isSafeInteger(maxQueued) || maxQueued < 0) throw new Error('Invalid tool queue capacity.');
   const token = Buffer.from('Bearer ' + randomBytes(32).toString('base64url'));
   const lifetime = new AbortController();
@@ -54,7 +56,7 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
       const chunks: Buffer[] = []; let size = 0;
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > 16_384) { res.writeHead(413).end(); return; }
+        if (size > maxRequestBytes) { res.writeHead(413).end(); return; }
         chunks.push(chunk);
       }
       let message: unknown;

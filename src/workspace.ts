@@ -1,3 +1,4 @@
+import { drawioOutsideWorkspace } from './drawio.js';
 import { realpathSync, statSync, accessSync, mkdirSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname, basename, join } from 'node:path';
@@ -25,6 +26,7 @@ export function resolveWorkspace(path: string, base: string): string {
 
 export function configForWorkspace(config: Config, workspace?: string): Config {
   const selected = workspace === undefined ? config : { ...config, workspace: resolveWorkspace(workspace, config.workspace) };
+  if (selected.drawio) drawioOutsideWorkspace(selected.drawio, selected.workspace);
   if (selected.audioTranscription) {
     try { audioOutsideWorkspace(selected.audioTranscription, selected.workspace); }
     catch {

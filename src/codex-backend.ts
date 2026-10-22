@@ -1,3 +1,5 @@
+import { drawioAction } from './drawio.js';
+import { startDrawioMcp, DRAWIO_SERVER, drawioInstructions } from './drawio-mcp.js';
 import { startGitHubMcp, GITHUB_SERVER, githubInstructions } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
@@ -80,6 +82,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
     let rooms: Awaited<ReturnType<typeof startRoomMessageMcp>> | undefined;
     let web: Awaited<ReturnType<typeof startFetchMcp>> | undefined;
+    let diagram: Awaited<ReturnType<typeof startDrawioMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
@@ -89,6 +92,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
+      if (config.drawio && config.sandbox !== 'read-only') diagram = await startDrawioMcp(drawioAction(config.drawio, outbox, config.maxMediaBytes), AbortSignal.any([signal, mediaLifetime.signal]));
       if (hooks?.roomMessages) rooms = await startRoomMessageMcp((input, signal) => hooks.roomMessages!(input, signal, outbox), AbortSignal.any([signal, mediaLifetime.signal]));
       if (hooks?.sendAttachments) {
         delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
@@ -155,7 +159,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       const session = state.session(key);
       const saved = session.codex;
       const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
-        + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '');
+        + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') + (diagram ? drawioInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -186,6 +190,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           [`mcp_servers.${ROOM_MESSAGE_SERVER}`]: rooms ? { url: rooms.url, http_headers: rooms.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['room_messages'],
             tools: { room_messages: { approval_mode: 'approve' } },
+          } : disabledMcp,
+          [`mcp_servers.${DRAWIO_SERVER}`]: diagram ? { url: diagram.url, http_headers: diagram.headers,
+            required: true, enabled: true, tool_timeout_sec: 75, enabled_tools: ['render_diagram'],
+            tools: { render_diagram: { approval_mode: 'approve' } },
           } : disabledMcp,
           // Read-only GET under human-configured URL prefixes; no approval needed.
           [`mcp_servers.${FETCH_SERVER}`]: web ? { url: web.url, http_headers: web.headers,
@@ -251,7 +259,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       mediaLifetime.abort();
       await media?.close();
       await rooms?.close();
-      await web?.close();
+      await web?.close(); await diagram?.close();
       await progress.catch(() => {});
       await github?.close(); await background?.close(); await publication?.close();
       current.ready.resolve();

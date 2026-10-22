@@ -1,3 +1,4 @@
+import { loadDrawioConfig } from './drawio.js';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadTunnelConfig } from './ssh-tunnel.js';
@@ -74,6 +75,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     maxMediaBytes,
     mediaUploadTimeoutMs,
     fetch: loadFetchConfig(env, workspace),
+    drawio: loadDrawioConfig(env, workspace),
     ...optionalAudioConfig(env, workspace),
   };
 }
