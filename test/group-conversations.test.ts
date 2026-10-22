@@ -71,10 +71,12 @@ test('three agents retain separate sessions and exact room membership', async t 
 test('shared observations remain available until the third agent has read them', t => {
   const f = fixture(t), incoming = message(owner, '$history');
   f.links.observe(bots[0], room, incoming);
-  for (const bot of bots) {
+  const logged = () => JSON.parse(readFileSync(f.history, 'utf8'))[room].messages.map((m: { id: string }) => m.id);
+  for (const [i, bot] of bots.entries()) {
     const prompt = f.links.prompt(bot, home(bot), message(owner, '$private-' + bot), 'Continue');
     assert.match(prompt, /\$history/);
     f.links.acknowledge(bot);
+    if (i < bots.length - 1) assert.deepEqual(logged(), ['$history']);
   }
   assert.deepEqual(JSON.parse(readFileSync(f.history, 'utf8'))[room].messages, []);
 });

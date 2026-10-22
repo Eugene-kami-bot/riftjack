@@ -234,6 +234,9 @@ A received mention starts a separate turn for the mentioned agent:
   The recipient validates the actual Matrix sender, room, destination, bounds
   and expiry after the normal room-access checks. Arbitrary observers cannot
   issue grants. This trust permits bounded agent invocation, not human approval.
+- Multi-recipient messages carry a separate credit grant for each recipient. All
+  installations participating in such a room must support multi-recipient grants.
+  Single-recipient messages retain the existing grant format.
 - Consumed grant IDs are saved until expiry, so replaying a grant under another
   event ID does not start another turn, including after restart. The receipt
   store holds at most 10,000 unexpired grants and refuses further admissions
@@ -265,7 +268,3 @@ The latter stores shared observations and read positions with private filesystem
 permissions. A changed group does not reuse another membership's observation log.
 
 [Chat commands](chat.md) · [Back to Riftjack](../README.md)
-
-Multi-recipient messages carry a separate credit grant for each recipient. All
-installations participating in such a room must support multi-recipient grants.
-Single-recipient messages retain the existing grant format.
