@@ -340,6 +340,15 @@ Files are kept under each bot’s workspace in `.matrix-media/`, in separate inc
 
 ## Task activity indicator
 
+After a successful agent turn, Riftjack adds a 🟦 reaction to the last message
+sent by that turn, including attachments and messages sent through room tools.
+The marker appears after final delivery. It means the turn has ended, not that
+the agent's broader task is finished. A silent turn with no messages, a failed
+or cancelled turn, and local commands receive no marker. Service notices and
+confirmation prompts are not targets. Reaction delivery is best-effort; failure
+does not resend the reply. Grok worker replies are marked after their last part
+is delivered too.
+
 For Codex, Claude and Bot Manager, “typing” means the bot is processing a request
 or awaiting confirmation within that request. The standard Matrix indicator
 covers an active task, including tool calls, preparation and final delivery.

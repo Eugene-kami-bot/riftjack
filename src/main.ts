@@ -241,6 +241,13 @@ async function main() {
         ? { rel_type: 'm.thread', event_id: relation.event_id }
         : undefined;
     };
+    const turnCompleted = async (room: string, eventId: string, sender: string) => {
+      if (stopping || restart.pending || !(await privateRoom(room, sender))) return;
+      if (stopping || restart.pending) return;
+      await client.sendRawEvent(room, 'm.reaction', {
+        'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key: '🟦' },
+      });
+    };
     let bridge: Bridge | WorkerBridge;
     if (account.kind === 'grok') {
       const workerDir = join(dir, 'worker');
@@ -270,8 +277,10 @@ async function main() {
         },
         send: async (task, transaction, encrypted) => {
           if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
-          await client.doRequest('PUT', '/_matrix/client/v3/rooms/' + encodeURIComponent(task.room) + '/send/m.room.encrypted/' + encodeURIComponent(transaction), null, encrypted);
+          const result = await client.doRequest('PUT', '/_matrix/client/v3/rooms/' + encodeURIComponent(task.room) + '/send/m.room.encrypted/' + encodeURIComponent(transaction), null, encrypted);
+          return result.event_id as string;
         },
+        completed: (task, eventId) => turnCompleted(task.room, eventId, task.event.sender!),
         report: diagnostics,
       });
       workers.set(account.userId, service); workerServer.add(account.userId, token, service);
@@ -310,11 +319,15 @@ async function main() {
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
-        send: (room, content) => client.sendMessage(room, content),
+        send: async (room, content) => {
+          const eventId = await client.sendMessage(room, content);
+          context.sent(room, eventId);
+          return eventId;
+        },
         read: reactionTarget,
         receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
         maxBytes: botConfig.maxMediaBytes,
-        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
+        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize, eventId => context.sent(room, eventId)),
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
@@ -417,9 +430,10 @@ async function main() {
       },
       receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
       transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
-      sendAttachments: (room, event, files, signal) => media.send(room, files, threadRelation(event), signal, async () => {
+      turnCompleted,
+      sendAttachments: (room, event, files, signal, sent) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');
-      }),
+      }, sent),
       async confirmation(room, event, text, controls, markdown) {
         await sendConfirmation(text, controls, {
           authorize: async () => {
@@ -435,15 +449,16 @@ async function main() {
           report: diagnostics,
         }, markdown);
       },
-      async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions) {
+      async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions, sent) {
         const replyTo = threadRelation(event);
         const contents = replyContent(mentions?.length ? mentionText(text, mentions) : text, markdown, true, msgtype);
         const replyId = randomBytes(9).toString('base64url');
         for (const [index, content] of contents.entries()) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');
           // Only the last part mentions a peer, after the complete reply is delivered.
-          await client.sendMessage(room, { ...links.outgoing(account.userId, room, content,
+          const eventId = await client.sendMessage(room, { ...links.outgoing(account.userId, room, content,
             index === contents.length - 1 ? mentions : undefined, replyId), 'm.relates_to': replyTo });
+          sent?.(eventId);
         }
       },
     });

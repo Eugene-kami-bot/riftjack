@@ -1094,3 +1094,143 @@ test('an interrupted compaction notice is delivered after cancellation without r
   assert.equal(updates.filter(Boolean).length, 1);
   assert.equal(updates.at(-1), false);
 });
+
+for (const kind of ['codex', 'claude', 'manager'] as const) test(`${kind} marks the last delivered part only after its turn completes`, async t => {
+  const ready = gate(), finish = gate(), delivery = gate(), delivered = gate();
+  const marked: unknown[] = [];
+  const f = fixture(t, kind, async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.progress!('working'); ready.release(); await finish.promise; return 'done';
+  }, true, {
+    reply: async (_room, _event, text, _markdown, _msgtype, _mentions, sent) => {
+      sent?.('$' + text + '-1');
+      if (text === 'done') { delivery.release(); await delivered.promise; }
+      sent?.('$' + text + '-2');
+    },
+    turnCompleted: async (...args) => { marked.push(args); },
+  });
+  await f.bridge.handle('!dm:test', event('!help', '$help'));
+  assert.deepEqual(marked, []);
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  assert.deepEqual(marked, []);
+  finish.release(); await delivery.promise; assert.deepEqual(marked, []);
+  delivered.release(); await task;
+  assert.deepEqual(marked, [['!dm:test', '$done-2', '@owner:test']]);
+});
+
+test('quiet turns track tool deliveries, ignore duplicate receipts and never mark a previous turn', async t => {
+  let turns = 0;
+  const marked: unknown[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal, _sender, _files, _interact, _publish, hooks) => {
+    if (++turns === 1) {
+      const request = { action: 'send', id: 'one', room: '!other:test', text: 'tool reply' };
+      await hooks!.roomMessages!(request, signal);
+      await hooks!.progress!('later progress');
+      await hooks!.roomMessages!(request, signal); // Cached receipt, no new message.
+      await hooks!.compaction!('started'); // A service notice, not agent output.
+    }
+    return 'NO_REPLY';
+  }, true, {
+    shared: () => true,
+    roomMessages: async (_request, context) => { context.sent('!other:test', '$tool'); return 'sent'; },
+    reply: async (_room, _event, _text, _markdown, _msgtype, _mentions, sent) => { sent?.('$progress'); },
+    compaction: async () => {},
+    turnCompleted: async (...args) => { marked.push(args); },
+  });
+  await f.bridge.handle('!dm:test', event());
+  await f.bridge.handle('!dm:test', event('next', '$2'));
+  assert.deepEqual(marked, [['!dm:test', '$progress', '@owner:test']]);
+});
+
+test('a quiet turn can mark its last message in another linked room', async t => {
+  const marked: unknown[] = [];
+  const f = fixture(t, 'claude', async (_mode, _prompt, _key, signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.roomMessages!({ action: 'send', id: 'one', room: '!other:test', text: 'reply' }, signal);
+    return 'NO_REPLY';
+  }, true, {
+    shared: () => true,
+    roomMessages: async (_request, context) => { context.sent('!other:test', '$tool'); return 'sent'; },
+    turnCompleted: async (...args) => { marked.push(args); },
+  });
+  await f.bridge.handle('!dm:test', event());
+  assert.deepEqual(marked, [['!other:test', '$tool', '@owner:test']]);
+});
+
+for (const mention of [false, true]) test(`completion follows actual text/attachment order (mention=${mention})`, async t => {
+  const marked: string[] = [];
+  const f = fixture(t, 'codex', async () => ({ text: 'done', attachments: [{ root: '/outbox', path: '/outbox/result.png' }] }), true, {
+    mentions: mention ? () => ({ text: 'done', mentions: ['@peer:test'], error: 'Service notice' }) : undefined,
+    reply: async (_room, _event, _text, _markdown, _msgtype, _mentions, sent) => { sent?.('$text'); },
+    sendAttachments: async (_room, _event, _files, _signal, sent) => { sent?.('$file'); },
+    turnCompleted: async (_room, id) => { marked.push(id); },
+  });
+  await f.bridge.handle('!dm:test', event());
+  assert.deepEqual(marked, [mention ? '$text' : '$file']);
+});
+
+for (const end of ['failure', 'cancel', 'stop', 'revocation', 'delivery failure'] as const) test(`no completion marker after ${end}`, async t => {
+  const ready = gate(), finish = gate(); let allowed = true;
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.progress!('working'); ready.release(); await finish.promise;
+    if (end === 'failure') throw new Error('backend failed');
+    signal.throwIfAborted(); return 'done';
+  }, true, {
+    isAuthorized: () => allowed,
+    reply: async (_room, _event, text, _markdown, _msgtype, _mentions, sent) => {
+      if (text === 'done' && end === 'delivery failure') throw new Error('send failed');
+      sent?.('$message');
+    },
+    turnCompleted: async () => { assert.fail('Must not mark an unfinished turn'); },
+  });
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  if (end === 'cancel') await f.bridge.handle('!dm:test', event('!cancel', '$cancel'));
+  if (end === 'stop') f.bridge.stop();
+  if (end === 'revocation') allowed = false;
+  finish.release(); await task;
+});
+
+test('a failed completion reaction does not replay a completed recoverable turn', async t => {
+  let runs = 0;
+  const failure = new Error('reaction unavailable');
+  const f = fixture(t, 'codex', async () => { runs++; return 'done'; }, true, {
+    recoverMessages: true,
+    reply: async (_room, _event, _text, _markdown, _msgtype, _mentions, sent) => { sent?.('$done'); },
+    turnCompleted: async () => { throw failure; },
+  });
+  await f.bridge.handle('!dm:test', event());
+  assert.deepEqual(f.errors, [failure]);
+  assert.deepEqual(f.state.recoverable('@bot:test'), []);
+  await f.bridge.handle('!dm:test', event());
+  assert.equal(runs, 1);
+});
+
+test('queued follow-up turns receive separate completion markers', async t => {
+  const started = gate(), finish = gate(), marked: string[] = [];
+  let count = 0;
+  const f = fixture(t, 'claude', async () => {
+    if (++count === 1) { started.release(); await finish.promise; }
+    else assert.deepEqual(marked, ['$reply1']);
+    return 'reply' + count;
+  }, true, {
+    steer: async () => false,
+    reply: async (_room, _event, text, _markdown, _msgtype, _mentions, sent) => { sent?.('$' + text); },
+    turnCompleted: async (_room, id) => { marked.push(id); },
+  });
+  const task = f.bridge.handle('!dm:test', event()); await started.promise;
+  await f.bridge.handle('!dm:test', event('follow-up', '$2'));
+  finish.release(); await task;
+  assert.deepEqual(marked, ['$reply1', '$reply2']);
+});
+
+test('a tool-only attachment turn marks its last delivered attachment', async t => {
+  const marked: string[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.sendAttachments!([{ path: '/outbox/result.png', root: '/outbox' }], signal);
+    return 'NO_REPLY';
+  }, true, {
+    shared: () => true,
+    sendAttachments: async (_room, _event, _files, _signal, sent) => { sent?.('$image'); },
+    turnCompleted: async (_room, id) => { marked.push(id); },
+  });
+  await f.bridge.handle('!dm:test', event());
+  assert.deepEqual(marked, ['$image']);
+});

@@ -9,7 +9,8 @@ export type WorkerTransport = {
   receive: (task: WorkerTask) => Promise<IncomingAttachment | undefined>;
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   prepare: (task: WorkerTask) => Promise<unknown[]>;
-  send: (task: WorkerTask, transaction: string, encrypted: unknown) => Promise<void>;
+  send: (task: WorkerTask, transaction: string, encrypted: unknown) => Promise<string | void>;
+  completed?: (task: WorkerTask, eventId: string) => Promise<void>;
   report: (error: unknown) => void;
 };
 export class WorkerService {
@@ -122,8 +123,13 @@ export class WorkerService {
             await this.allowed(task);
             // Check cancellation after asynchronous access checks, before sending.
             if (this.queue.get(task.id).status !== 'replied') break;
-            await this.transport.send(task, this.queue.transaction(task.id, task.delivery.next), task.delivery.events[task.delivery.next]);
+            const eventId = await this.transport.send(task, this.queue.transaction(task.id, task.delivery.next), task.delivery.events[task.delivery.next]);
             this.queue.deliveredPart(task.id); task = this.queue.get(task.id);
+            if (task.status === 'delivered' && eventId && this.transport.completed) {
+              // Delivery is already durable; a reaction failure must not resend it.
+              await this.allowed(task);
+              await this.transport.completed(task, eventId);
+            }
           }
         } catch (error) { this.transport.report(error); }
       }

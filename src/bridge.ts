@@ -47,20 +47,21 @@ type Options = {
   ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
-  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
+  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[], sent?: (eventId: string) => void) => Promise<void>;
+  turnCompleted?: (room: string, eventId: string, sender: string) => Promise<void>;
   typing?: (room: string, typing: boolean, timeout: number) => Promise<unknown>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>) => Promise<IncomingAttachment>;
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
   resolveManagerAvatar?: (prompt: string, sender: string) => string | false;
-  sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
+  sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal, sent?: (eventId: string) => void) => Promise<void>;
   status?: (key: string) => string;
   tasks?: (room: string, event: MatrixEvent, key: string, options: { history: boolean; page: number }) => string;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
-  roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
+  roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string; sent: (room: string, eventId: string) => void }, signal: AbortSignal) => Promise<string>;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -452,6 +453,11 @@ export class Bridge {
         current.running = true;
         const requestEvent = next.event;
         const turnLifetime = new AbortController();
+        // Track actual agent deliveries for this turn, never service notices or
+        // a previous turn's output. The transport reports each delivered part.
+        let lastMessage: { room: string; eventId: string } | undefined;
+        const sent = (destination: string, eventId: string) => { lastMessage = { room: destination, eventId }; };
+        const sentHere = (eventId: string) => sent(room, eventId);
         const interact: Interact = (request, requestSignal) => current.interactions.ask(request,
           AbortSignal.any([controller.signal, requestSignal]), async (text, controls, markdown) => {
             await this.authorize(room, current);
@@ -477,7 +483,7 @@ export class Bridge {
           finally { current.publication = false; }
         } : undefined;
         const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
-          o.roomMessages!(request, { room, event: requestEvent, key: backendKey }, signal));
+          o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent }, signal));
         const hooks: BackendHooks = {
           compaction: o.compaction ? async phase => {
             try {
@@ -500,7 +506,7 @@ export class Bridge {
             signal.throwIfAborted();
             await this.authorize(room, current);
             signal.throwIfAborted();
-            await this.deliver(room, () => o.sendAttachments!(room, requestEvent, files, signal));
+            await this.deliver(room, () => o.sendAttachments!(room, requestEvent, files, signal, sentHere));
           } : undefined,
           github: o.github ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
@@ -520,7 +526,7 @@ export class Bridge {
             turnLifetime.signal.throwIfAborted();
             await this.authorize(room, current);
             turnLifetime.signal.throwIfAborted();
-            await this.reply(room, requestEvent, text, true, 'm.text');
+            await this.reply(room, requestEvent, text, true, 'm.text', undefined, sentHere);
           },
         };
         let modelPrompt = next.prompt.startsWith('!') ? next.prompt
@@ -553,7 +559,7 @@ export class Bridge {
         const sendFiles = async () => {
           if (!files.length) return;
           if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
-          await this.deliver(room, () => o.sendAttachments!(room, responseEvent, files, controller.signal));
+          await this.deliver(room, () => o.sendAttachments!(room, responseEvent, files, controller.signal, sentHere));
         };
         // A peer-started turn, or any turn in a shared room, may decline to
         // answer: the text is dropped, attachments are still sent. Commands
@@ -564,7 +570,7 @@ export class Bridge {
         if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
-          const respond = (body: string) => this.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions);
+          const respond = (body: string) => this.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions, sentHere);
           // A declined reply sends no text and wakes nobody.
           if (!quiet && (text || mentions)) await respond(text);
           else if (!quiet && !files.length) await respond(typeof result === 'string' ? 'The task completed without a text response.' : 'The task completed without a response.');
@@ -579,6 +585,12 @@ export class Bridge {
         // Checkpoint the notification before processing human follow-ups: a
         // later follow-up failure must not replay an already completed notice.
         if (responseEvent === event) background?.completed?.();
+        if (!command && lastMessage && o.turnCompleted) {
+          try {
+            await this.authorize(room, current);
+            await o.turnCompleted(lastMessage.room, lastMessage.eventId, current.sender);
+          } catch (error) { o.report(error); } // A cosmetic failure must not replay the turn.
+        }
         next = current.followups.shift();
       }
     } catch (error) {

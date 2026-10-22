@@ -110,7 +110,12 @@ test('image, audio and document messages upload ciphertext and preserve threads 
   ] as const) {
     const path = join(root, name); writeFileSync(path, data);
     const relation = name === 'report.pdf' ? undefined : thread;
-    await f.media.send('!dm:test', [{ root, path }], relation, signal(), async () => {});
+    const receipts: string[] = [];
+    await f.media.send('!dm:test', [{ root, path }], relation, signal(), async () => {}, id => {
+      assert.equal(f.messages.at(-1)?.body, name);
+      receipts.push(id);
+    });
+    assert.deepEqual(receipts, ['$sent']);
     const message = f.messages.at(-1)!;
     assert.equal(message.msgtype, msgtype);
     assert.equal(message.info.mimetype, mimetype);

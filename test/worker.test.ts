@@ -283,3 +283,26 @@ test('worker status reports only this conversation queue and does not claim mode
   await bridge.handle('!dm:test', { ...event('$denied', '!status'), sender: '@stranger:test' });
   assert.equal(replies.length, 2);
 });
+
+for (const failure of [false, true]) test(`worker marks only its last durable reply part (reaction failure=${failure})`, async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  t.after(() => queue.close());
+  const marked: string[] = [], errors: unknown[] = [];
+  let sends = 0;
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => true, receive: async () => undefined,
+    prepare: async () => ['text', 'attachment'],
+    send: async () => { assert.deepEqual(marked, []); return '$part' + ++sends; },
+    completed: async (task, id) => {
+      assert.equal(queue.get(task.id).status, 'delivered'); marked.push(id);
+      if (failure) throw new Error('reaction failed');
+    },
+    report: error => errors.push(error),
+  });
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  await service.complete(task.id, task.lease!, { text: 'reply' }); await idle(service);
+  await service.deliver();
+  assert.equal(sends, 2); assert.deepEqual(marked, ['$part2']);
+  assert.equal(errors.length, failure ? 1 : 0);
+  assert.equal(queue.get(task.id).status, 'delivered'); service.stop();
+});
