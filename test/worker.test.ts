@@ -226,6 +226,31 @@ test('worker sync checkpoints only after inbox commit and retains the old checkp
   }
 });
 
+test('worker durably retries messages whose room key arrived after the sync event', async t => {
+  const file = join(directory(t), 'matrix.json'), storage = new SimpleFsStorageProvider(file);
+  class Client extends WorkerMatrixClient {
+    decrypted = false;
+    record(room: string, value: object) { return this.rememberFailedDecryption(room, value); }
+    retry() { return this.retryFailedDecryptions(); }
+    override async getEvent() {
+      if (!this.decrypted) throw new Error('missing room key');
+      return event('$late') as any;
+    }
+  }
+  let client = new Client('https://matrix.test', 'synthetic-token', storage);
+  await client.record('!dm:test', { event_id: '$late' });
+  client.inbox = async () => assert.fail('A message without its room key must remain pending');
+  await client.retry();
+
+  client = new Client('https://matrix.test', 'synthetic-token', new SimpleFsStorageProvider(file));
+  client.decrypted = true;
+  const received: string[] = [];
+  client.inbox = async (_room, value) => { received.push(value.event_id); };
+  await client.retry();
+  assert.deepEqual(received, ['$late']);
+  assert.deepEqual(JSON.parse(new SimpleFsStorageProvider(file).readValue('riftjack.worker.failed_decryptions.v1')!), []);
+});
+
 test('Grok provisioning syntax and disabled-by-default worker port are explicit', () => {
   assert.deepEqual(parseManagerRequest('create a Grok bot called Research'), { action: 'create', kind: 'grok', name: 'Research' });
   const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test', RIFTJACK_WORKSPACE: process.cwd() };
