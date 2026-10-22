@@ -266,12 +266,17 @@ async function main() {
           const authorize = async () => {
             if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
           };
-          const contents: Record<string, unknown>[] = task.response!.text ? replyContent(task.response!.text, true, false, 'm.text') : [];
+          const parsed = linkedAgent && task.response!.text ? links.mentions(account.userId, task.room, task.response!.text) : undefined;
+          const responseText = parsed?.error ? [parsed.text, parsed.error].filter(Boolean).join('\n\n') : parsed?.text ?? task.response!.text;
+          const contents: Record<string, unknown>[] = responseText
+            ? replyContent(parsed?.mentions.length ? mentionText(responseText, parsed.mentions) : responseText, true, false, 'm.text') : [];
           for (const file of task.response!.files) contents.push(await media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(config.mediaUploadTimeoutMs), authorize));
-          const encrypted: unknown[] = [];
-          for (const content of contents) {
+          const encrypted: unknown[] = [], replyId = randomBytes(9).toString('base64url');
+          for (const [index, content] of contents.entries()) {
             await authorize();
-            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...content, 'm.relates_to': threadRelation(task.event) }));
+            const outgoing = links.outgoing(account.userId, task.room, content,
+              index === contents.length - 1 ? parsed?.mentions : undefined, replyId);
+            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...outgoing, 'm.relates_to': threadRelation(task.event) }));
           }
           return encrypted;
         },
@@ -480,10 +485,14 @@ async function main() {
         // notice turn, once per recipient. Executor results use the durable inbox above.
         if (event.sender !== shared.owner) {
           const mention = links.mention(account.userId, room, event);
-          if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
+          if (mention) {
+            if (bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
+            else void bridge.handle(room, mention).catch(diagnostics);
+          }
           return false;
         }
         if (!links.addressed(account.userId, room, event)) return false;
+        if (bridge instanceof WorkerBridge) links.credit(account.userId);
       }
       return true;
     };
