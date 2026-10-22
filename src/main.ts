@@ -285,13 +285,12 @@ async function main() {
       });
       workers.set(account.userId, service); workerServer.add(account.userId, token, service);
       bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget,
+        conversationKey: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
         reply: async (room, event, text) => {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Worker control reply withheld.');
           await client.sendMessage(room, { msgtype: 'm.notice', body: text, 'm.relates_to': threadRelation(event) });
         },
       });
-      (client as WorkerMatrixClient).inbox = (room, event) => bridge.handle(room, event);
-      client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
       console.log(account.userId + ' worker token file: ' + tokenFile);
     } else bridge = new Bridge({
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
@@ -503,7 +502,7 @@ async function main() {
       incoming = incoming.catch(() => {}).then(() => prepareIncoming(room, event));
       return incoming;
     };
-    if (client instanceof MessageMatrixClient) {
+    if (client instanceof MessageMatrixClient || client instanceof WorkerMatrixClient) {
       client.inbox = async (room, event) => { await inbox(room, event); };
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
     } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(diagnostics); });

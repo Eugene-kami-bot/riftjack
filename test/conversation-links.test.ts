@@ -374,6 +374,17 @@ test('links continue the existing session and refuse missing or replaced histori
   assert.throws(f.load, /missing or changed/);
 });
 
+test('external workers may pin their existing private session to a shared room', async t => {
+  const f = fixture(t);
+  f.state.update(canonical, { grok: 'worker-thread' });
+  f.config.agents[0].session = 'worker-thread';
+  writeFileSync(f.path, JSON.stringify(f.config));
+  const links = new ConversationLinks(f.path, join(f.dir, 'worker-history.json'),
+    [{ userId: bot, kind: 'grok', name: 'Worker', accessToken: 'test' }], f.state, human);
+  assert.equal(links.key(bot, group, message('hello')), canonical);
+  assert.equal(await links.allowed(bot, group, human, async () => roomState()), true);
+});
+
 test('agent observations persist, do not become instructions or cross-room steering, and mentions address only their targets', t => {
   const f = fixture(t);
   f.links.observe(bot, group, message('A shared finding', '$peer', peer));

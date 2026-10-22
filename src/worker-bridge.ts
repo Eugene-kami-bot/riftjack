@@ -10,6 +10,7 @@ export class WorkerBridge {
   private stopped = false;
   constructor(private options: { botId: string; authorized: (sender: string) => boolean;
     privateRoom: (room: string, sender: string) => Promise<boolean>; queue: WorkerQueue;
+    conversationKey?: (room: string, event: MatrixEvent) => string;
     reactionTarget?: ReactionReader;
     service: WorkerService; state: State; reply: (room: string, event: MatrixEvent, text: string) => Promise<void> }) {}
   get busy() { return this.options.service.busy; }
@@ -29,13 +30,18 @@ export class WorkerBridge {
       (event.content.msgtype !== 'm.text' && !isMedia(event.content.msgtype)) ||
       event.content['m.relates_to']?.rel_type === 'm.replace') return;
     if (!(await o.privateRoom(room, event.sender)) || !o.authorized(event.sender)) return;
-    const key = sessionKey(room, event);
+    const key = o.conversationKey?.(room, event) ?? sessionKey(room, event);
     const body = event.content.body?.trim() || '';
     if (event.content.msgtype === 'm.text' && body.startsWith('!')) {
       // Control events use the same durable deduplication as ordinary messages.
       const command = o.queue.enqueue(room, event, key, true);
       if (command.status === 'cancelled' || command.status === 'delivered') return;
       if (body === '!cancel' || body === '!reset') {
+        if (body === '!reset' && o.conversationKey) {
+          o.queue.cancel(command.id);
+          await o.reply(room, event, 'This worker continues a pinned session across linked rooms. Reset is disabled; explicitly reconfigure its session link to replace that history.');
+          return;
+        }
         o.queue.cancelWhere(task => task.room === room && task.event.sender === event.sender && task.conversation.startsWith(key + '\n'));
         if (body === '!reset') o.state.update(key, { grok: randomUUID() });
         o.queue.cancel(command.id);

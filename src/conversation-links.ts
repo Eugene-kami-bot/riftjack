@@ -81,7 +81,7 @@ export class ConversationLinks {
       if (!matrixUser(agent.bot) || agent.owner !== owner || !matrixRoom(agent.home) ||
           typeof agent.session !== 'string' || !agent.session ||
           (agent.thread !== undefined && (typeof agent.thread !== 'string' || !agent.thread.startsWith('$'))) ||
-          !account || !['codex', 'claude'].includes(account.kind)) throw new PublicError('Link an existing Codex or Claude bot to its owner and original DM session.');
+          !account || !['codex', 'claude', 'grok'].includes(account.kind)) throw new PublicError('Link an existing Codex, Claude or external-worker bot to its owner and original DM session.');
       this.assertSession(agent);
     }
     if (!unique(c.agents.map(a => this.anchor(a))) || !unique(c.agents.map(a =>
@@ -141,7 +141,7 @@ export class ConversationLinks {
   sharedRooms(bot: string): string[] { return this.config.rooms.filter(r => r.bots.includes(bot)).map(r => r.room); }
   private anchor(a: Agent) { return JSON.stringify([a.home, a.owner, a.thread ?? null]); }
   private assertSession(a: Agent) {
-    const kind = this.accounts.find(account => account.userId === a.bot)!.kind as 'codex' | 'claude';
+    const kind = this.accounts.find(account => account.userId === a.bot)!.kind as 'codex' | 'claude' | 'grok';
     if (this.state.session(this.anchor(a))[kind] !== a.session) throw new PublicError('Linked session is missing or changed. Restore its state or explicitly reconfigure the link; no replacement session was created.');
   }
   key(bot: string, room: string, event: MatrixEvent): string {

@@ -83,7 +83,7 @@ session. Each agent keeps its own session and processes one task at a time;
 different agents can work concurrently.
 
 This is opt-in. Ordinary bots retain their separate DM/thread conversations.
-Grok workers and the manager do not support session links.
+External workers and coding agents support session links. The manager does not.
 
 ## Configuration
 

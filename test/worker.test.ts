@@ -204,6 +204,24 @@ test('Grok room messages are durable and reset changes conversation identity whi
   assert.equal(replies.length, 1); bridge.stop(); queue.close();
 });
 
+test('a linked worker reuses its pinned conversation across rooms and refuses reset', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true,
+    receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {} });
+  const replies: string[] = [], state = new State(join(dir, 'state.json'));
+  state.update('pinned', { grok: 'worker-thread' });
+  const bridge = new WorkerBridge({ botId: '@grok:test', authorized: sender => sender === '@alice:test', privateRoom: async () => true,
+    conversationKey: () => 'pinned', queue, service, state,
+    reply: async (_room, _event, text) => { replies.push(text); } });
+  await bridge.handle('!dm:test', event('$dm'));
+  await bridge.handle('!shared:test', event('$shared'));
+  assert.deepEqual(queue.list().map(task => task.conversation), ['pinned\nworker-thread', 'pinned\nworker-thread']);
+  await bridge.handle('!shared:test', event('$reset-linked', '!reset'));
+  assert.equal(state.session('pinned').grok, 'worker-thread');
+  assert.match(replies[0], /pinned session/);
+  bridge.stop(); queue.close();
+});
+
 test('worker sync checkpoints only after inbox commit and retains the old checkpoint on failure', async t => {
   for (const fail of [false, true]) for (const reaction of [false, true]) {
     const file = join(directory(t), 'matrix.json'), storage = new SimpleFsStorageProvider(file);
