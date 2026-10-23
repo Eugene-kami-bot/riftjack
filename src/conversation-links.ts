@@ -10,7 +10,7 @@ import { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 export { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 
 type Agent = { bot: string; owner: string; home: string; session: string; thread?: string };
-type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[] };
+type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[]; addresses?: Record<string, string[]> };
 type Configuration = { version: 1; agents: Agent[]; rooms: Room[] };
 type Entry = { seq: number; id: string; sender: string; role: 'human' | 'agent' | 'participant'; body: string; type: string; reply?: string };
 type Cursor = { seq: number; offset: number };
@@ -28,7 +28,9 @@ type History = Record<string, { members: string; messages: Entry[]; next: number
 type Credit = { level: number; since: number };
 type WireGrant = { version: 1; id: string; from: string; to: string; room: string; remaining: number; since: number };
 type Grant = { from: string; to: string; room: string; level: number; since: number; wire?: WireGrant };
-type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number> };
+type ExternalSend = { digest: string; status: 'uncertain' | 'sent'; expires: number; eventId?: string };
+type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number>;
+  externalOrigins?: Record<string, number>; externalSends?: Record<string, ExternalSend> };
 const CREDITS_KEY = '#credits';
 const roomMembers = (room: Room) => [room.owner, ...room.bots, ...(room.observers ?? [])];
 const membershipKey = (room: Room) => JSON.stringify([room.owner, ...roomMembers(room).slice(1).sort()]);
@@ -81,7 +83,7 @@ export class ConversationLinks {
       if (!matrixUser(agent.bot) || agent.owner !== owner || !matrixRoom(agent.home) ||
           typeof agent.session !== 'string' || !agent.session ||
           (agent.thread !== undefined && (typeof agent.thread !== 'string' || !agent.thread.startsWith('$'))) ||
-          !account || !['codex', 'claude'].includes(account.kind)) throw new PublicError('Link an existing Codex or Claude bot to its owner and original DM session.');
+          !account || !['codex', 'claude', 'grok'].includes(account.kind)) throw new PublicError('Link an existing Codex, Claude or external-worker bot to its owner and original DM session.');
       this.assertSession(agent);
     }
     if (!unique(c.agents.map(a => this.anchor(a))) || !unique(c.agents.map(a =>
@@ -93,6 +95,15 @@ export class ConversationLinks {
           !room.bots.every(matrixUser) || (room.observers !== undefined && (!Array.isArray(room.observers) || !room.observers.every(matrixUser))) || !unique(roomMembers(room)) || c.agents.some(a => a.home === room.room) ||
           !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and at least two distinct agents, including a linked local agent.');
       if (room.executors !== undefined && (!Array.isArray(room.executors) || !room.executors.every(id => matrixUser(id) && room.observers?.includes(id)) || !unique(room.executors))) throw new PublicError('Executors must be distinct configured observers.');
+      if (room.addresses !== undefined) {
+        if (!room.addresses || typeof room.addresses !== 'object' || Array.isArray(room.addresses) ||
+            !unique(Object.keys(room.addresses)) || Object.keys(room.addresses).length !== room.bots.length ||
+            !room.bots.every(bot => Array.isArray(room.addresses![bot]) && room.addresses![bot].length > 0) ||
+            !Object.values(room.addresses).every(aliases => aliases.every(alias => typeof alias === 'string' && alias.trim() === alias && alias.length > 0 && alias.length <= 64)) ||
+            !unique(Object.values(room.addresses).flat().map(alias => alias.toLocaleLowerCase()))) {
+          throw new PublicError('Shared-room text addresses must give every bot distinct non-empty aliases.');
+        }
+      }
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }
@@ -109,6 +120,40 @@ export class ConversationLinks {
     if (!this.agent(bot)) return;
     this.credits.agents[bot] = { level: PEER_CREDIT, since: now };
     this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, grant]) => grant.from !== bot));
+    this.saveHistory();
+  }
+  // A trusted external worker may receive the owner's message through another
+  // authenticated channel. The worker supplies that channel's durable event ID;
+  // each ID can restore credit once and expires with the resulting reserve.
+  creditExternal(bot: string, origin: string, since: number, now = Date.now()): boolean {
+    if (!this.agent(bot) || !/^[a-zA-Z0-9][a-zA-Z0-9:._/-]{0,255}$/.test(origin) || !validCreditTime(since, now)) return false;
+    const origins = this.credits.externalOrigins = Object.fromEntries(Object.entries(this.credits.externalOrigins ?? {})
+      .filter(([, expires]) => expires > now));
+    const key = JSON.stringify([bot, origin]);
+    if (origins[key]) return true;
+    if (Object.keys(origins).length >= 10_000) return false;
+    origins[key] = since + CREDIT_TTL_MS;
+    this.credits.agents[bot] = { level: PEER_CREDIT, since };
+    this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, grant]) => grant.from !== bot));
+    this.saveHistory();
+    return true;
+  }
+  beginExternalSend(bot: string, id: string, digest: string, now = Date.now()): ExternalSend | undefined {
+    const sends = this.credits.externalSends = Object.fromEntries(Object.entries(this.credits.externalSends ?? {})
+      .filter(([, send]) => send.expires > now));
+    const key = JSON.stringify([bot, id]), previous = sends[key];
+    if (previous) {
+      if (previous.digest !== digest) throw new PublicError('This worker room-message ID was already used with different content.');
+      return previous;
+    }
+    if (Object.keys(sends).length >= 10_000) throw new PublicError('The worker room-message receipt limit was reached.');
+    sends[key] = { digest, status: 'uncertain', expires: now + CREDIT_TTL_MS };
+    this.saveHistory();
+  }
+  finishExternalSend(bot: string, id: string, digest: string, eventId: string): void {
+    const key = JSON.stringify([bot, id]), send = this.credits.externalSends?.[key];
+    if (!send || send.digest !== digest || send.status !== 'uncertain') throw new PublicError('Worker room-message receipt changed during delivery.');
+    this.credits.externalSends![key] = { ...send, status: 'sent', eventId };
     this.saveHistory();
   }
   peerCredit(bot: string, now = Date.now()): number {
@@ -141,7 +186,7 @@ export class ConversationLinks {
   sharedRooms(bot: string): string[] { return this.config.rooms.filter(r => r.bots.includes(bot)).map(r => r.room); }
   private anchor(a: Agent) { return JSON.stringify([a.home, a.owner, a.thread ?? null]); }
   private assertSession(a: Agent) {
-    const kind = this.accounts.find(account => account.userId === a.bot)!.kind as 'codex' | 'claude';
+    const kind = this.accounts.find(account => account.userId === a.bot)!.kind as 'codex' | 'claude' | 'grok';
     if (this.state.session(this.anchor(a))[kind] !== a.session) throw new PublicError('Linked session is missing or changed. Restore its state or explicitly reconfigure the link; no replacement session was created.');
   }
   key(bot: string, room: string, event: MatrixEvent): string {
@@ -331,7 +376,37 @@ export class ConversationLinks {
   addressed(bot: string, room: string, event: MatrixEvent): boolean {
     if (!this.room(bot, room) || event.type !== 'm.room.message') return true;
     const mentions = event.content?.['m.mentions']?.user_ids;
-    return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
+    if (Array.isArray(mentions) && mentions.length > 0) return mentions.includes(bot);
+    const shared = this.room(bot, room)!;
+    if (event.sender !== shared.owner || event.content?.msgtype !== 'm.text' || !shared.addresses) return true;
+    const recipients = this.textRecipients(shared, event.content.body ?? '');
+    return recipients.length === 0 || recipients.includes(bot);
+  }
+  private textRecipients(shared: Room, raw: string): string[] {
+    const text = raw.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '').trimStart();
+    const aliases = Object.entries(shared.addresses ?? {}).flatMap(([recipient, values]) =>
+      values.map(value => ({ recipient, value, folded: value.toLocaleLowerCase() })))
+      .sort((a, b) => b.value.length - a.value.length);
+    const folded = text.toLocaleLowerCase(), recipients: string[] = [];
+    let offset = 0;
+    const match = () => aliases.find(alias => folded.startsWith(alias.folded, offset) &&
+      (offset + alias.folded.length === folded.length || /[\s,:;.!?—-]/u.test(text[offset + alias.value.length])));
+    let alias = match();
+    while (alias) {
+      if (!recipients.includes(alias.recipient)) recipients.push(alias.recipient);
+      offset += alias.value.length;
+      while (/\s/u.test(text[offset] ?? '')) offset++;
+      const rest = folded.slice(offset);
+      const separator = rest.match(/^(?:,|&|и(?=\s)|and(?=\s))/u)?.[0];
+      if (!separator) break;
+      const candidateOffset = offset + separator.length;
+      let nextOffset = candidateOffset;
+      while (/\s/u.test(text[nextOffset] ?? '')) nextOffset++;
+      const before = offset; offset = nextOffset;
+      alias = match();
+      if (!alias) { offset = before; break; }
+    }
+    return recipients;
   }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
     const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];

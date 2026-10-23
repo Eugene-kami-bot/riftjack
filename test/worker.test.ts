@@ -204,6 +204,24 @@ test('Grok room messages are durable and reset changes conversation identity whi
   assert.equal(replies.length, 1); bridge.stop(); queue.close();
 });
 
+test('a linked worker reuses its pinned conversation across rooms and refuses reset', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true,
+    receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {} });
+  const replies: string[] = [], state = new State(join(dir, 'state.json'));
+  state.update('pinned', { grok: 'worker-thread' });
+  const bridge = new WorkerBridge({ botId: '@grok:test', authorized: sender => sender === '@alice:test', privateRoom: async () => true,
+    conversationKey: () => 'pinned', queue, service, state,
+    reply: async (_room, _event, text) => { replies.push(text); } });
+  await bridge.handle('!dm:test', event('$dm'));
+  await bridge.handle('!shared:test', event('$shared'));
+  assert.deepEqual(queue.list().map(task => task.conversation), ['pinned\nworker-thread', 'pinned\nworker-thread']);
+  await bridge.handle('!shared:test', event('$reset-linked', '!reset'));
+  assert.equal(state.session('pinned').grok, 'worker-thread');
+  assert.match(replies[0], /pinned session/);
+  bridge.stop(); queue.close();
+});
+
 test('worker sync checkpoints only after inbox commit and retains the old checkpoint on failure', async t => {
   for (const fail of [false, true]) for (const reaction of [false, true]) {
     const file = join(directory(t), 'matrix.json'), storage = new SimpleFsStorageProvider(file);
@@ -224,6 +242,31 @@ test('worker sync checkpoints only after inbox commit and retains the old checkp
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(fatal, fail); assert.equal(storage.getSyncToken(), fail ? 'previous' : 'next');
   }
+});
+
+test('worker durably retries messages whose room key arrived after the sync event', async t => {
+  const file = join(directory(t), 'matrix.json'), storage = new SimpleFsStorageProvider(file);
+  class Client extends WorkerMatrixClient {
+    decrypted = false;
+    record(room: string, value: object) { return this.rememberFailedDecryption(room, value); }
+    retry() { return this.retryFailedDecryptions(); }
+    override async getEvent() {
+      if (!this.decrypted) throw new Error('missing room key');
+      return event('$late') as any;
+    }
+  }
+  let client = new Client('https://matrix.test', 'synthetic-token', storage);
+  await client.record('!dm:test', { event_id: '$late' });
+  client.inbox = async () => assert.fail('A message without its room key must remain pending');
+  await client.retry();
+
+  client = new Client('https://matrix.test', 'synthetic-token', new SimpleFsStorageProvider(file));
+  client.decrypted = true;
+  const received: string[] = [];
+  client.inbox = async (_room, value) => { received.push(value.event_id); };
+  await client.retry();
+  assert.deepEqual(received, ['$late']);
+  assert.deepEqual(JSON.parse(new SimpleFsStorageProvider(file).readValue('riftjack.worker.failed_decryptions.v1')!), []);
 });
 
 test('Grok provisioning syntax and disabled-by-default worker port are explicit', () => {

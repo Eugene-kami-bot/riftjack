@@ -1,13 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { PublicError } from './errors.js';
 import { WorkerError } from './worker-queue.js';
 import type { WorkerService } from './worker-service.js';
+import type { RoomMessageTool } from './room-messages.js';
 
 export class WorkerServer {
-  private bots = new Map<string, { token: string; service: WorkerService }>();
+  private bots = new Map<string, { token: string; service: WorkerService; rooms?: RoomMessageTool }>();
   private controllers = new Set<AbortController>();
   private server = createServer((request, response) => { void this.handle(request, response); });
-  add(bot: string, token: string, service: WorkerService) { this.bots.set(bot, { token, service }); }
+  add(bot: string, token: string, service: WorkerService, rooms?: RoomMessageTool) { this.bots.set(bot, { token, service, rooms }); }
   remove(bot: string) { this.bots.delete(bot); }
   async start(port: number) {
     await new Promise<void>((resolve, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', resolve); });
@@ -19,6 +21,7 @@ export class WorkerServer {
   }
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const controller = new AbortController(); this.controllers.add(controller);
+    let roomsRequest = false;
     response.on('close', () => controller.abort());
     const send = (status: number, body: unknown) => {
       if (response.destroyed) return;
@@ -28,11 +31,26 @@ export class WorkerServer {
     try {
       if (request.headers.origin) throw new WorkerError(403, 'Browser requests are not supported.');
       const url = new URL(request.url || '/', 'http://localhost');
-      const match = /^\/v1\/bots\/([^/]+)\/(tasks)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment))?)?$/.exec(url.pathname);
+      const match = /^\/v1\/bots\/([^/]+)\/(tasks|rooms)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment))?)?$/.exec(url.pathname);
       const selected = match && this.bots.get(decodeURIComponent(match[1]));
       const bearer = request.headers.authorization?.replace(/^Bearer /, '') || '';
       if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
       const { service } = selected;
+      if (match![2] === 'rooms') {
+        roomsRequest = true;
+        if (!selected.rooms || request.method !== 'POST' || match![3]) throw new WorkerError(404, 'Unknown worker endpoint.');
+        let size = 0; const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 32_768) throw new WorkerError(413, 'Request too large.');
+          chunks.push(Buffer.from(chunk));
+        }
+        let body;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+        catch { throw new WorkerError(400, 'Expected JSON.'); }
+        const result = await selected.rooms(body, controller.signal);
+        send(200, JSON.parse(result)); return;
+      }
       const id = match![3], action = match![4];
       if (request.method === 'GET' && !id) {
         const seconds = Number(url.searchParams.get('wait') || '0');
@@ -70,8 +88,11 @@ export class WorkerServer {
         : await service.complete(id, body.lease, body);
       send(200, result);
     } catch (error) {
-      if (!controller.signal.aborted) send(error instanceof WorkerError ? error.status : 503,
-        { error: error instanceof WorkerError ? error.message : 'Worker service is temporarily unavailable.' });
+      if (!controller.signal.aborted) {
+        const expectedRoomError = roomsRequest && error instanceof PublicError;
+        send(error instanceof WorkerError ? error.status : expectedRoomError ? 400 : 503,
+          { error: error instanceof WorkerError || expectedRoomError ? error.message : 'Worker service is temporarily unavailable.' });
+      }
     } finally { this.controllers.delete(controller); }
   }
 }

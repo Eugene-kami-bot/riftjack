@@ -115,24 +115,82 @@ Claude tasks; worker tasks use leases and explicit cancellation instead.
 The Codex/Claude approval protocol (`!approve`, forms and reactions) is not exposed
 by this worker API. Grok's tools continue to use their own environment's approvals.
 
+## Send from another authenticated owner channel
+
+A linked external worker may send text to its configured shared rooms even when
+the current owner request arrived through another trusted channel such as
+Telegram. List the exact destinations first, then use a durable message ID:
+
+```sh
+python3 worker-client.py rooms
+python3 worker-client.py send --room '!shared:example.org' --text-file request.txt \
+  --id telegram-12345 --mentions '@reviewer:example.org' \
+  --owner-turn-id telegram:update-12345 --owner-turn-time 1792742400000
+```
+
+For Nerve, prefer deriving those fields from the current session instead of
+asking the model to copy them:
+
+```sh
+export RIFTJACK_NERVE_DB=/path/to/nerve.db
+python3 worker-client.py send --room '!shared:example.org' --text-file request.txt \
+  --id telegram-12345 --mention --owner-session CURRENT_NERVE_SESSION_ID
+```
+
+The client opens the database read-only, requires the session source to be
+`telegram` by default, and uses its latest stored user-message ID and timestamp.
+Set `RIFTJACK_OWNER_SOURCES` to a comma-separated allowlist only when the worker
+has another authenticated human channel. Do not include the source used by the
+Matrix adapter: peer-triggered turns must not mint owner credit.
+
+Agent platforms that support stdio MCP can expose the same interface as a native
+tool instead of teaching the model shell syntax. Configure the command as
+`python3 /path/to/worker-client.py mcp` with the worker URL, bot ID, token-file
+path and read-only Nerve database path in its environment. The tool is named
+`room_messages`; its `owner_session` argument performs the same database-backed
+derivation. Keep the token and database out of prompts and command arguments.
+
+`owner-turn-id` must be the durable ID assigned by the worker platform to that
+accepted human event, and `owner-turn-time` is its Unix time in milliseconds.
+The trusted worker adapter, not untrusted message text, supplies both fields.
+The event restores the same five-unit peer-credit reserve as an accepted Matrix
+message, at most once, and expires after one day. Peer messages, timers and
+background work must omit `owner_turn`; they cannot mint a new conversation
+generation. A worker integration that cannot distinguish authenticated human
+input from agent or service events must not supply it.
+
+Room sends accept only the bot's configured linked rooms (or its linked private
+room without mentions), recheck live encryption/membership access, and use
+Matrix encryption held by Riftjack. A send ID is durable for one day. Reusing it
+with identical content returns the saved receipt; different content is rejected.
+If delivery became uncertain, the same ID returns `uncertain` and is not sent
+again automatically. This API carries owner authorization into the existing
+bounded peer-routing mechanism; it does not turn another agent's text into owner
+approval.
+
 ## HTTP contract
 
-All routes are below `/v1/bots/{URL-encoded Matrix bot ID}/tasks` and require
+All routes are below `/v1/bots/{URL-encoded Matrix bot ID}` and require
 `Authorization: Bearer <worker token>`. Browser requests with Origin headers are
 rejected. No endpoint permits choosing an arbitrary Matrix destination.
 
 | Request | Meaning |
 | --- | --- |
-| `GET ?wait=30` | Claim the next task; returns `{task: ...}` or `{task: null}`. Maximum wait is 30 s. |
-| `GET /{id}` | Read task status. |
-| `POST /{id}/renew` | Extend the lease. JSON: `{lease}`. |
-| `POST /{id}/release` | Return the task to the queue. JSON: `{lease}`. |
-| `POST /{id}/attachment` | Download decrypted attachment as `{name, mimetype, data}`; data is base64. JSON: `{lease}`. |
-| `POST /{id}/reply` | Save `{lease, text, files: [{name, data}]}`; file data is base64. |
+| `GET /tasks?wait=30` | Claim the next task; returns `{task: ...}` or `{task: null}`. Maximum wait is 30 s. |
+| `GET /tasks/{id}` | Read task status. |
+| `POST /tasks/{id}/renew` | Extend the lease. JSON: `{lease}`. |
+| `POST /tasks/{id}/release` | Return the task to the queue. JSON: `{lease}`. |
+| `POST /tasks/{id}/attachment` | Download decrypted attachment as `{name, mimetype, data}`; data is base64. JSON: `{lease}`. |
+| `POST /tasks/{id}/reply` | Save `{lease, text, files: [{name, data}]}`; file data is base64. |
+| `POST /rooms` | Run the linked-room `list` or `send` action. A cross-channel mentioning send includes `owner_turn: {id, time}` from the trusted worker adapter. |
 
-Status codes: 401 invalid credentials, 403 lost access/private-room eligibility,
-404 unknown task, 409 stale lease or conflicting reply, 413 excessive size,
-503 temporary service failure. Recheck status after uncertain responses.
+Status codes: 400 invalid room action or a room send refused by current
+destination/mention/credit policy, 401 invalid credentials, 403 lost
+access/private-room eligibility, 404 unknown task, 409 stale lease or
+conflicting reply, 413 excessive size, 503 unexpected temporary service
+failure. A 400 response includes the safe actionable reason; correct the
+request instead of retrying it unchanged. Recheck status after uncertain
+responses.
 
 The inbox lives in `DATA_DIR/bots/<bot hash>/worker/queue.sqlite`; the token and
 reply uploads are alongside it. Treat this directory as private conversation

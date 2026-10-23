@@ -21,6 +21,7 @@ import { MessageMatrixClient } from './message-matrix-client.js';
 import { WorkerQueue } from './worker-queue.js';
 import { WorkerService } from './worker-service.js';
 import { WorkerServer } from './worker-server.js';
+import { workerRoomMessages } from './worker-rooms.js';
 import { Bridge, sessionKey, SERVICE, type MatrixEvent } from './bridge.js';
 import { replyContent } from './message-format.js';
 import { inlineCode, markdownText, managerBotList } from './manager-format.js';
@@ -266,12 +267,17 @@ async function main() {
           const authorize = async () => {
             if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
           };
-          const contents: Record<string, unknown>[] = task.response!.text ? replyContent(task.response!.text, true, false, 'm.text') : [];
+          const parsed = linkedAgent && task.response!.text ? links.mentions(account.userId, task.room, task.response!.text) : undefined;
+          const responseText = parsed?.error ? [parsed.text, parsed.error].filter(Boolean).join('\n\n') : parsed?.text ?? task.response!.text;
+          const contents: Record<string, unknown>[] = responseText
+            ? replyContent(parsed?.mentions.length ? mentionText(responseText, parsed.mentions) : responseText, true, false, 'm.text') : [];
           for (const file of task.response!.files) contents.push(await media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(config.mediaUploadTimeoutMs), authorize));
-          const encrypted: unknown[] = [];
-          for (const content of contents) {
+          const encrypted: unknown[] = [], replyId = randomBytes(9).toString('base64url');
+          for (const [index, content] of contents.entries()) {
             await authorize();
-            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...content, 'm.relates_to': threadRelation(task.event) }));
+            const outgoing = links.outgoing(account.userId, task.room, content,
+              index === contents.length - 1 ? parsed?.mentions : undefined, replyId);
+            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...outgoing, 'm.relates_to': threadRelation(task.event) }));
           }
           return encrypted;
         },
@@ -283,15 +289,22 @@ async function main() {
         completed: (task, eventId) => turnCompleted(task.room, eventId, task.event.sender!),
         report: diagnostics,
       });
-      workers.set(account.userId, service); workerServer.add(account.userId, token, service);
+      const workerRooms = linkedAgent ? workerRoomMessages(links, account.userId, linkedAgent.owner, {
+        allowed: privateRoom, stopping: () => stopping || restart.pending,
+        send: (room, content) => client.sendMessage(room, content),
+        read: reactionTarget,
+        receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
+        maxBytes: botConfig.maxMediaBytes,
+        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
+      }) : undefined;
+      workers.set(account.userId, service); workerServer.add(account.userId, token, service, workerRooms);
       bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget,
+        conversationKey: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
         reply: async (room, event, text) => {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Worker control reply withheld.');
           await client.sendMessage(room, { msgtype: 'm.notice', body: text, 'm.relates_to': threadRelation(event) });
         },
       });
-      (client as WorkerMatrixClient).inbox = (room, event) => bridge.handle(room, event);
-      client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
       console.log(account.userId + ' worker token file: ' + tokenFile);
     } else bridge = new Bridge({
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
@@ -481,10 +494,14 @@ async function main() {
         // notice turn, once per recipient. Executor results use the durable inbox above.
         if (event.sender !== shared.owner) {
           const mention = links.mention(account.userId, room, event);
-          if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
+          if (mention) {
+            if (bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
+            else void bridge.handle(room, mention).catch(diagnostics);
+          }
           return false;
         }
         if (!links.addressed(account.userId, room, event)) return false;
+        if (bridge instanceof WorkerBridge) links.credit(account.userId);
       }
       return true;
     };
@@ -503,7 +520,7 @@ async function main() {
       incoming = incoming.catch(() => {}).then(() => prepareIncoming(room, event));
       return incoming;
     };
-    if (client instanceof MessageMatrixClient) {
+    if (client instanceof MessageMatrixClient || client instanceof WorkerMatrixClient) {
       client.inbox = async (room, event) => { await inbox(room, event); };
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
     } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(diagnostics); });

@@ -83,7 +83,7 @@ session. Each agent keeps its own session and processes one task at a time;
 different agents can work concurrently.
 
 This is opt-in. Ordinary bots retain their separate DM/thread conversations.
-Grok workers and the manager do not support session links.
+External workers and coding agents support session links. The manager does not.
 
 ## Configuration
 
@@ -103,7 +103,7 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
     {"bot":"@tester:example.com", "owner":"@alice:example.com", "home":"!tester-dm:example.com", "session":"existing-tester-session"}
   ],
   "rooms": [
-    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com", "@tester:example.com"]}
+    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com", "@tester:example.com"], "addresses":{"@builder:example.com":["Builder"], "@reviewer:example.com":["Reviewer"], "@tester:example.com":["Tester"]}}
   ]
 }
 ```
@@ -124,6 +124,14 @@ changes the membership boundary and resets that room's observation history.
 Configure the list locally before inviting them; an unlisted participant still
 blocks room processing.
 
+An optional `addresses` object maps every configured bot to one or more unique,
+case-insensitive text aliases. When Matrix `m.mentions` are absent, aliases at
+the start of an owner's text message route the turn to only those agents. A
+comma, `and`, `&`, or the Russian conjunction `и` can join leading aliases; a
+message without a leading alias still addresses every agent. Explicit Matrix
+mentions take precedence. Each alias must be trimmed, non-empty, no longer than
+64 characters, and unique across the room.
+
 The initial connector owner controls these links. Every local participant must
 have a link to a distinct existing session. A missing or different session causes
 an error instead of a fresh start. `!reset` is disabled for linked agents;
@@ -137,8 +145,10 @@ the same agent session in two connectors.
 
 ## Messages and turns
 
-- A Matrix **@mention** addresses one agent. An unaddressed human message in the
-  shared room addresses all configured agents. Plain text spelling a display name is not a mention.
+- A Matrix **@mention** addresses one agent. When optional text `addresses` are
+  configured, a leading alias also selects the corresponding agent or agents.
+  An otherwise unaddressed human message in the shared room addresses all
+  configured agents. Plain text names elsewhere in the message do not route it.
 - In the shared room an agent may answer a human message with exactly
   `NO_REPLY`, for example when it addresses the other agent; nothing is sent
   then. Command results are always sent. Ordinary turns in both shared and
@@ -218,7 +228,10 @@ A received mention starts a separate turn for the mentioned agent:
   avoid answering twice. After a failed earlier turn the notice is unchanged.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Starting the peer costs **peer credit**. Each local agent has a reserve of at
-  most 5. A newly accepted human message restores it to 5. Each distinct recipient of an outgoing mention
+  most 5. A newly accepted human message restores it to 5. For a linked external
+  worker, a trusted adapter may identify a newly accepted owner event from another
+  authenticated channel; its durable event ID restores the same reserve once.
+  Agent, timer and background events cannot do so. Each distinct recipient of an outgoing mention
   costs one; the recipient keeps the larger of its own reserve and the sender's
   remainder, never the sum. For example, sending twice to one recipient from a reserve of 5 passes
   4 and then 3; mentioning two recipients at once passes 3 to each. A recipient that already has 5 keeps 5, even when passed zero.
