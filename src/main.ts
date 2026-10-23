@@ -21,6 +21,7 @@ import { MessageMatrixClient } from './message-matrix-client.js';
 import { WorkerQueue } from './worker-queue.js';
 import { WorkerService } from './worker-service.js';
 import { WorkerServer } from './worker-server.js';
+import { workerRoomMessages } from './worker-rooms.js';
 import { Bridge, sessionKey, SERVICE, type MatrixEvent } from './bridge.js';
 import { replyContent } from './message-format.js';
 import { inlineCode, markdownText, managerBotList } from './manager-format.js';
@@ -288,7 +289,15 @@ async function main() {
         completed: (task, eventId) => turnCompleted(task.room, eventId, task.event.sender!),
         report: diagnostics,
       });
-      workers.set(account.userId, service); workerServer.add(account.userId, token, service);
+      const workerRooms = linkedAgent ? workerRoomMessages(links, account.userId, linkedAgent.owner, {
+        allowed: privateRoom, stopping: () => stopping || restart.pending,
+        send: (room, content) => client.sendMessage(room, content),
+        read: reactionTarget,
+        receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
+        maxBytes: botConfig.maxMediaBytes,
+        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
+      }) : undefined;
+      workers.set(account.userId, service); workerServer.add(account.userId, token, service, workerRooms);
       bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget,
         conversationKey: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
         reply: async (room, event, text) => {

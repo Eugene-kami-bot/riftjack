@@ -10,6 +10,7 @@ import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText,
 import { replyContent } from '../src/message-format.js';
 import { State } from '../src/state.js';
 import { linkedRoomMessages, roomMessageDelivery } from '../src/room-messages.js';
+import { workerRoomMessages } from '../src/worker-rooms.js';
 import { AGENT_TRIGGER, Bridge, GRANT, NOTICE, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
 
 const human = '@alice:test', bot = '@builder:test', peer = '@reviewer:test';
@@ -1032,6 +1033,46 @@ test('each outgoing mention passes the remaining reserve and duplicate delivery 
   assert.equal(b.links.peerCredit(peer), 3);
   for (let i = 2; i < PEER_CREDIT; i++) assert.ok(a.links.reserve(bot, group));
   assert.equal(a.links.reserve(bot, group), undefined);
+});
+
+test('an external owner turn restores bounded peer credit once and room sends are durable', async t => {
+  const f = fixture(t), signal = new AbortController().signal;
+  let sends = 0;
+  const tool = workerRoomMessages(f.links, bot, human, {
+    allowed: async () => true, stopping: () => false,
+    send: async (_room, content) => { sends++; assert.deepEqual(content['m.mentions'].user_ids, [peer]); return '$external-' + sends; },
+  });
+  const request = (id: string, origin = 'telegram:message-1', time = Date.now()) => tool({ action: 'send', room: group,
+    text: 'Please review.', id, mentions: [peer], owner_turn: { id: origin, time } }, signal);
+  const first = JSON.parse(await request('external-1'));
+  assert.equal(first.event_id, '$external-1'); assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 1);
+  assert.deepEqual(JSON.parse(await request('external-1')), { status: 'sent', room: group, event_id: '$external-1', replayed: true });
+  assert.equal(sends, 1);
+  // Reusing the same human event does not refill the reserve.
+  await request('external-2'); assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 2);
+  // A fresh accepted human event starts a new bounded generation.
+  await request('external-3', 'telegram:message-2'); assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 1);
+  const reloaded = workerRoomMessages(f.load(), bot, human, {
+    allowed: async () => true, stopping: () => false,
+    send: async () => { sends++; return '$unexpected'; },
+  });
+  assert.deepEqual(JSON.parse(await reloaded({ action: 'send', room: group, text: 'Please review.', id: 'external-1',
+    mentions: [peer], owner_turn: { id: 'telegram:message-1', time: Date.now() } }, signal)),
+  { status: 'sent', room: group, event_id: '$external-1', replayed: true });
+  assert.equal(sends, 3);
+  await assert.rejects(request('expired', 'telegram:expired', Date.now() - 86_400_000), /last 24 hours/);
+  let failures = 0;
+  const failing = workerRoomMessages(f.links, bot, human, {
+    allowed: async () => true, stopping: () => false,
+    send: async () => { failures++; throw new Error('delivery failed'); },
+  });
+  const uncertain = { action: 'send' as const, room: group, text: 'May have arrived.', id: 'uncertain-1', mentions: [peer],
+    owner_turn: { id: 'telegram:message-3', time: Date.now() } };
+  await assert.rejects(failing(uncertain, signal), /delivery failed/);
+  assert.deepEqual(JSON.parse(await workerRoomMessages(f.load(), bot, human, {
+    allowed: async () => true, stopping: () => false, send: async () => { failures++; return '$duplicate'; },
+  })(uncertain, signal)), { status: 'uncertain', room: group, replayed: true });
+  assert.equal(failures, 1);
 });
 
 test('a recipient keeps its own larger credit even when a mention passes zero', t => {

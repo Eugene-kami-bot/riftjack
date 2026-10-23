@@ -228,7 +228,10 @@ A received mention starts a separate turn for the mentioned agent:
   avoid answering twice. After a failed earlier turn the notice is unchanged.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Starting the peer costs **peer credit**. Each local agent has a reserve of at
-  most 5. A newly accepted human message restores it to 5. Each distinct recipient of an outgoing mention
+  most 5. A newly accepted human message restores it to 5. For a linked external
+  worker, a trusted adapter may identify a newly accepted owner event from another
+  authenticated channel; its durable event ID restores the same reserve once.
+  Agent, timer and background events cannot do so. Each distinct recipient of an outgoing mention
   costs one; the recipient keeps the larger of its own reserve and the sender's
   remainder, never the sum. For example, sending twice to one recipient from a reserve of 5 passes
   4 and then 3; mentioning two recipients at once passes 3 to each. A recipient that already has 5 keeps 5, even when passed zero.

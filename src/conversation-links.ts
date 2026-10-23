@@ -28,7 +28,9 @@ type History = Record<string, { members: string; messages: Entry[]; next: number
 type Credit = { level: number; since: number };
 type WireGrant = { version: 1; id: string; from: string; to: string; room: string; remaining: number; since: number };
 type Grant = { from: string; to: string; room: string; level: number; since: number; wire?: WireGrant };
-type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number> };
+type ExternalSend = { digest: string; status: 'uncertain' | 'sent'; expires: number; eventId?: string };
+type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number>;
+  externalOrigins?: Record<string, number>; externalSends?: Record<string, ExternalSend> };
 const CREDITS_KEY = '#credits';
 const roomMembers = (room: Room) => [room.owner, ...room.bots, ...(room.observers ?? [])];
 const membershipKey = (room: Room) => JSON.stringify([room.owner, ...roomMembers(room).slice(1).sort()]);
@@ -118,6 +120,40 @@ export class ConversationLinks {
     if (!this.agent(bot)) return;
     this.credits.agents[bot] = { level: PEER_CREDIT, since: now };
     this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, grant]) => grant.from !== bot));
+    this.saveHistory();
+  }
+  // A trusted external worker may receive the owner's message through another
+  // authenticated channel. The worker supplies that channel's durable event ID;
+  // each ID can restore credit once and expires with the resulting reserve.
+  creditExternal(bot: string, origin: string, since: number, now = Date.now()): boolean {
+    if (!this.agent(bot) || !/^[a-zA-Z0-9][a-zA-Z0-9:._/-]{0,255}$/.test(origin) || !validCreditTime(since, now)) return false;
+    const origins = this.credits.externalOrigins = Object.fromEntries(Object.entries(this.credits.externalOrigins ?? {})
+      .filter(([, expires]) => expires > now));
+    const key = JSON.stringify([bot, origin]);
+    if (origins[key]) return true;
+    if (Object.keys(origins).length >= 10_000) return false;
+    origins[key] = since + CREDIT_TTL_MS;
+    this.credits.agents[bot] = { level: PEER_CREDIT, since };
+    this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, grant]) => grant.from !== bot));
+    this.saveHistory();
+    return true;
+  }
+  beginExternalSend(bot: string, id: string, digest: string, now = Date.now()): ExternalSend | undefined {
+    const sends = this.credits.externalSends = Object.fromEntries(Object.entries(this.credits.externalSends ?? {})
+      .filter(([, send]) => send.expires > now));
+    const key = JSON.stringify([bot, id]), previous = sends[key];
+    if (previous) {
+      if (previous.digest !== digest) throw new PublicError('This worker room-message ID was already used with different content.');
+      return previous;
+    }
+    if (Object.keys(sends).length >= 10_000) throw new PublicError('The worker room-message receipt limit was reached.');
+    sends[key] = { digest, status: 'uncertain', expires: now + CREDIT_TTL_MS };
+    this.saveHistory();
+  }
+  finishExternalSend(bot: string, id: string, digest: string, eventId: string): void {
+    const key = JSON.stringify([bot, id]), send = this.credits.externalSends?.[key];
+    if (!send || send.digest !== digest || send.status !== 'uncertain') throw new PublicError('Worker room-message receipt changed during delivery.');
+    this.credits.externalSends![key] = { ...send, status: 'sent', eventId };
     this.saveHistory();
   }
   peerCredit(bot: string, now = Date.now()): number {
