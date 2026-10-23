@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { PublicError } from './errors.js';
 import { WorkerError } from './worker-queue.js';
 import type { WorkerService } from './worker-service.js';
 import type { RoomMessageTool } from './room-messages.js';
@@ -20,6 +21,7 @@ export class WorkerServer {
   }
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const controller = new AbortController(); this.controllers.add(controller);
+    let roomsRequest = false;
     response.on('close', () => controller.abort());
     const send = (status: number, body: unknown) => {
       if (response.destroyed) return;
@@ -35,6 +37,7 @@ export class WorkerServer {
       if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
       const { service } = selected;
       if (match![2] === 'rooms') {
+        roomsRequest = true;
         if (!selected.rooms || request.method !== 'POST' || match![3]) throw new WorkerError(404, 'Unknown worker endpoint.');
         let size = 0; const chunks: Buffer[] = [];
         for await (const chunk of request) {
@@ -85,8 +88,11 @@ export class WorkerServer {
         : await service.complete(id, body.lease, body);
       send(200, result);
     } catch (error) {
-      if (!controller.signal.aborted) send(error instanceof WorkerError ? error.status : 503,
-        { error: error instanceof WorkerError ? error.message : 'Worker service is temporarily unavailable.' });
+      if (!controller.signal.aborted) {
+        const expectedRoomError = roomsRequest && error instanceof PublicError;
+        send(error instanceof WorkerError ? error.status : expectedRoomError ? 400 : 503,
+          { error: error instanceof WorkerError || expectedRoomError ? error.message : 'Worker service is temporarily unavailable.' });
+      }
     } finally { this.controllers.delete(controller); }
   }
 }

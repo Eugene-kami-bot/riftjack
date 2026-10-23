@@ -1073,6 +1073,19 @@ test('an external owner turn restores bounded peer credit once and room sends ar
     allowed: async () => true, stopping: () => false, send: async () => { failures++; return '$duplicate'; },
   })(uncertain, signal)), { status: 'uncertain', room: group, replayed: true });
   assert.equal(failures, 1);
+  // The HTTP worker lives for the whole connector process. Its per-call cache
+  // must not turn the coding-agent limit of 32 sends per turn into a permanent
+  // process-wide limit.
+  let longLivedSends = 0;
+  const longLived = workerRoomMessages(f.links, bot, human, {
+    allowed: async () => true, stopping: () => false,
+    send: async () => '$long-lived-' + ++longLivedSends,
+  });
+  for (let i = 0; i < 40; i++) {
+    const sent = JSON.parse(await longLived({ action: 'send', room: home, text: 'Status ' + i, id: 'long-lived-' + i }, signal));
+    assert.equal(sent.event_id, '$long-lived-' + (i + 1));
+  }
+  assert.equal(longLivedSends, 40);
 });
 
 test('a recipient keeps its own larger credit even when a mention passes zero', t => {

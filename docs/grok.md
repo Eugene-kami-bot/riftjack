@@ -184,9 +184,13 @@ rejected. No endpoint permits choosing an arbitrary Matrix destination.
 | `POST /tasks/{id}/reply` | Save `{lease, text, files: [{name, data}]}`; file data is base64. |
 | `POST /rooms` | Run the linked-room `list` or `send` action. A cross-channel mentioning send includes `owner_turn: {id, time}` from the trusted worker adapter. |
 
-Status codes: 401 invalid credentials, 403 lost access/private-room eligibility,
-404 unknown task, 409 stale lease or conflicting reply, 413 excessive size,
-503 temporary service failure. Recheck status after uncertain responses.
+Status codes: 400 invalid room action or a room send refused by current
+destination/mention/credit policy, 401 invalid credentials, 403 lost
+access/private-room eligibility, 404 unknown task, 409 stale lease or
+conflicting reply, 413 excessive size, 503 unexpected temporary service
+failure. A 400 response includes the safe actionable reason; correct the
+request instead of retrying it unchanged. Recheck status after uncertain
+responses.
 
 The inbox lives in `DATA_DIR/bots/<bot hash>/worker/queue.sqlite`; the token and
 reply uploads are alongside it. Treat this directory as private conversation

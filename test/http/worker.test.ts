@@ -12,6 +12,7 @@ import { WorkerService } from '../../src/worker-service.js';
 import { WorkerServer } from '../../src/worker-server.js';
 import { WorkerBridge } from '../../src/worker-bridge.js';
 import { State } from '../../src/state.js';
+import { PublicError } from '../../src/errors.js';
 
 const event = (id = '$one', body = 'hello') => ({ type: 'm.room.message', event_id: id, sender: '@alice:test', origin_server_ts: 1000, content: { msgtype: 'm.text', body } });
 function directory(t: { after(fn: () => void): void }) {
@@ -32,6 +33,7 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   const server = new WorkerServer(); server.add('@grok:test', 'a'.repeat(43), service, async input => {
     roomCalls.push(input);
     const request = input as { action?: string; room?: string };
+    if (request.action === 'reject') throw new PublicError('Correct the room request.');
     return JSON.stringify(request.action === 'list' ? { rooms: [{ room: '!shared:test', type: 'shared', agents: ['@grok:test', '@peer:test'] }] }
       : { status: 'sent', room: request.room, event_id: '$worker-room' });
   });
@@ -48,6 +50,9 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   assert.equal((await fetch(roomsUrl, { method: 'POST', headers: { Origin: 'https://browser.test', Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
   assert.deepEqual(await (await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'list' }) })).json(),
     { rooms: [{ room: '!shared:test', type: 'shared', agents: ['@grok:test', '@peer:test'] }] });
+  const rejected = await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject' }) });
+  assert.equal(rejected.status, 400);
+  assert.deepEqual(await rejected.json(), { error: 'Correct the room request.' });
   const waiting = request('?wait=2');
   setTimeout(() => queue.enqueue('!dm:test', event(), 'c'), 20);
   const task = (await (await waiting).json()).task;

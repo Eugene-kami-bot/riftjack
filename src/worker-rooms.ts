@@ -16,8 +16,12 @@ export function workerRoomMessages(links: ConversationLinks, bot: string, owner:
   const home = links.agent(bot)?.home;
   if (!home) throw new PublicError('The external worker is not linked to a conversation.');
   const action = linkedRoomMessages(links, bot, { event, key: links.key(bot, home, event) }, transport);
-  const deliver = roomMessageDelivery(action);
   return async (input, signal) => {
+    // The ordinary room-message delivery cache is deliberately scoped to one
+    // backend turn. An external worker endpoint is process-long, so retaining
+    // one cache here would permanently reject every new ID after 32 sends.
+    // Durable replay protection for worker sends lives in externalSends below.
+    const deliver = roomMessageDelivery(action);
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a worker room-message request.');
     const raw = input as Record<string, unknown>, ownerTurn = raw.owner_turn as OwnerTurn | undefined;
     if (ownerTurn !== undefined) {
