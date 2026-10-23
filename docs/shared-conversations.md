@@ -103,7 +103,7 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
     {"bot":"@tester:example.com", "owner":"@alice:example.com", "home":"!tester-dm:example.com", "session":"existing-tester-session"}
   ],
   "rooms": [
-    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com", "@tester:example.com"]}
+    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com", "@tester:example.com"], "addresses":{"@builder:example.com":["Builder"], "@reviewer:example.com":["Reviewer"], "@tester:example.com":["Tester"]}}
   ]
 }
 ```
@@ -124,6 +124,14 @@ changes the membership boundary and resets that room's observation history.
 Configure the list locally before inviting them; an unlisted participant still
 blocks room processing.
 
+An optional `addresses` object maps every configured bot to one or more unique,
+case-insensitive text aliases. When Matrix `m.mentions` are absent, aliases at
+the start of an owner's text message route the turn to only those agents. A
+comma, `and`, `&`, or the Russian conjunction `и` can join leading aliases; a
+message without a leading alias still addresses every agent. Explicit Matrix
+mentions take precedence. Each alias must be trimmed, non-empty, no longer than
+64 characters, and unique across the room.
+
 The initial connector owner controls these links. Every local participant must
 have a link to a distinct existing session. A missing or different session causes
 an error instead of a fresh start. `!reset` is disabled for linked agents;
@@ -137,8 +145,10 @@ the same agent session in two connectors.
 
 ## Messages and turns
 
-- A Matrix **@mention** addresses one agent. An unaddressed human message in the
-  shared room addresses all configured agents. Plain text spelling a display name is not a mention.
+- A Matrix **@mention** addresses one agent. When optional text `addresses` are
+  configured, a leading alias also selects the corresponding agent or agents.
+  An otherwise unaddressed human message in the shared room addresses all
+  configured agents. Plain text names elsewhere in the message do not route it.
 - In the shared room an agent may answer a human message with exactly
   `NO_REPLY`, for example when it addresses the other agent; nothing is sent
   then. Command results are always sent. Ordinary turns in both shared and

@@ -9,6 +9,7 @@ import { State } from '../src/state.js';
 import { linkedRoomMessages, roomMessageDelivery } from '../src/room-messages.js';
 
 const owner = '@owner:test', bots = ['@one:test', '@two:test', '@three:test'];
+const addresses = { [bots[0]]: ['Builder', 'Строитель'], [bots[1]]: ['Reviewer', 'Рецензент'], [bots[2]]: ['Tester', 'Тестер'] };
 const room = '!group:test';
 const message = (sender = owner, id = '$human'): MatrixEvent => ({ type: 'm.room.message', sender,
   event_id: id, origin_server_ts: 1000, content: { msgtype: 'm.text', body: 'Hello' } });
@@ -20,7 +21,7 @@ function fixture(t: { after(fn: () => void): void }, local = bots) {
   const accounts = local.map(userId => ({ userId, kind: 'claude' as const, name: userId, accessToken: 'test' }));
   const agents = local.map(bot => ({ bot, owner, home: home(bot), session: 'session-' + bots.indexOf(bot) }));
   for (const agent of agents) state.update(sessionKey(agent.home, message()), { claude: agent.session });
-  const config = { version: 1, agents, rooms: [{ room, owner, bots }] };
+  const config = { version: 1, agents, rooms: [{ room, owner, bots, addresses }] };
   const path = join(dir, 'links.json'), history = join(dir, 'history.json');
   writeFileSync(path, JSON.stringify(config));
   const load = () => new ConversationLinks(path, history, accounts, state, owner);
@@ -66,6 +67,39 @@ test('three agents retain separate sessions and exact room membership', async t 
   }
   writeFileSync(f.path, JSON.stringify({ ...f.config, agents: f.config.agents.slice(0, 2) }));
   assert.throws(f.load, /explicit session link/);
+});
+
+test('configured leading text addresses select agents when Matrix mentions are absent', t => {
+  const f = fixture(t);
+  const addressed = (body: string, bot: string) => {
+    const event = message(owner, '$' + body);
+    event.content!.body = body;
+    return f.links.addressed(bot, room, event);
+  };
+  assert.equal(addressed('Рецензент, проверь канал', bots[0]), false);
+  assert.equal(addressed('Рецензент, проверь канал', bots[1]), true);
+  assert.equal(addressed('Строитель, почему Рецензент не отвечает?', bots[0]), true);
+  assert.equal(addressed('Строитель, почему Рецензент не отвечает?', bots[1]), false);
+  assert.equal(addressed('Строитель и Рецензент, проверьте канал', bots[0]), true);
+  assert.equal(addressed('Строитель и Рецензент, проверьте канал', bots[1]), true);
+  assert.equal(addressed('Строитель и Рецензент, проверьте канал', bots[2]), false);
+  assert.equal(addressed('Общий вопрос без адресата', bots[0]), true);
+  assert.equal(addressed('Общий вопрос без адресата', bots[1]), true);
+  assert.equal(addressed('Общий вопрос без адресата', bots[2]), true);
+  assert.equal(addressed('> quoted\n\nРецензент: ответь', bots[0]), false);
+  assert.equal(addressed('> quoted\n\nРецензент: ответь', bots[1]), true);
+});
+
+test('shared-room text addresses require complete distinct aliases', t => {
+  const f = fixture(t);
+  for (const invalid of [
+    { [bots[0]]: ['Builder'] },
+    { ...addresses, [bots[1]]: ['builder'] },
+    { ...addresses, [bots[1]]: [] },
+  ]) {
+    writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: [{ room, owner, bots, addresses: invalid }] }));
+    assert.throws(f.load, /text addresses/);
+  }
 });
 
 test('shared observations remain available until the third agent has read them', t => {

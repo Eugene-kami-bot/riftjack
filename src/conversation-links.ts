@@ -10,7 +10,7 @@ import { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 export { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 
 type Agent = { bot: string; owner: string; home: string; session: string; thread?: string };
-type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[] };
+type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[]; addresses?: Record<string, string[]> };
 type Configuration = { version: 1; agents: Agent[]; rooms: Room[] };
 type Entry = { seq: number; id: string; sender: string; role: 'human' | 'agent' | 'participant'; body: string; type: string; reply?: string };
 type Cursor = { seq: number; offset: number };
@@ -93,6 +93,15 @@ export class ConversationLinks {
           !room.bots.every(matrixUser) || (room.observers !== undefined && (!Array.isArray(room.observers) || !room.observers.every(matrixUser))) || !unique(roomMembers(room)) || c.agents.some(a => a.home === room.room) ||
           !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and at least two distinct agents, including a linked local agent.');
       if (room.executors !== undefined && (!Array.isArray(room.executors) || !room.executors.every(id => matrixUser(id) && room.observers?.includes(id)) || !unique(room.executors))) throw new PublicError('Executors must be distinct configured observers.');
+      if (room.addresses !== undefined) {
+        if (!room.addresses || typeof room.addresses !== 'object' || Array.isArray(room.addresses) ||
+            !unique(Object.keys(room.addresses)) || Object.keys(room.addresses).length !== room.bots.length ||
+            !room.bots.every(bot => Array.isArray(room.addresses![bot]) && room.addresses![bot].length > 0) ||
+            !Object.values(room.addresses).every(aliases => aliases.every(alias => typeof alias === 'string' && alias.trim() === alias && alias.length > 0 && alias.length <= 64)) ||
+            !unique(Object.values(room.addresses).flat().map(alias => alias.toLocaleLowerCase()))) {
+          throw new PublicError('Shared-room text addresses must give every bot distinct non-empty aliases.');
+        }
+      }
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }
@@ -331,7 +340,37 @@ export class ConversationLinks {
   addressed(bot: string, room: string, event: MatrixEvent): boolean {
     if (!this.room(bot, room) || event.type !== 'm.room.message') return true;
     const mentions = event.content?.['m.mentions']?.user_ids;
-    return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
+    if (Array.isArray(mentions) && mentions.length > 0) return mentions.includes(bot);
+    const shared = this.room(bot, room)!;
+    if (event.sender !== shared.owner || event.content?.msgtype !== 'm.text' || !shared.addresses) return true;
+    const recipients = this.textRecipients(shared, event.content.body ?? '');
+    return recipients.length === 0 || recipients.includes(bot);
+  }
+  private textRecipients(shared: Room, raw: string): string[] {
+    const text = raw.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '').trimStart();
+    const aliases = Object.entries(shared.addresses ?? {}).flatMap(([recipient, values]) =>
+      values.map(value => ({ recipient, value, folded: value.toLocaleLowerCase() })))
+      .sort((a, b) => b.value.length - a.value.length);
+    const folded = text.toLocaleLowerCase(), recipients: string[] = [];
+    let offset = 0;
+    const match = () => aliases.find(alias => folded.startsWith(alias.folded, offset) &&
+      (offset + alias.folded.length === folded.length || /[\s,:;.!?—-]/u.test(text[offset + alias.value.length])));
+    let alias = match();
+    while (alias) {
+      if (!recipients.includes(alias.recipient)) recipients.push(alias.recipient);
+      offset += alias.value.length;
+      while (/\s/u.test(text[offset] ?? '')) offset++;
+      const rest = folded.slice(offset);
+      const separator = rest.match(/^(?:,|&|и(?=\s)|and(?=\s))/u)?.[0];
+      if (!separator) break;
+      const candidateOffset = offset + separator.length;
+      let nextOffset = candidateOffset;
+      while (/\s/u.test(text[nextOffset] ?? '')) nextOffset++;
+      const before = offset; offset = nextOffset;
+      alias = match();
+      if (!alias) { offset = before; break; }
+    }
+    return recipients;
   }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
     const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
