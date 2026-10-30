@@ -7,6 +7,8 @@ import { isMedia, outgoingAttachments, type IncomingAttachment, type OutgoingAtt
 // Use explicit recipients in groups; mention=true selects the sole peer in a pair room.
 export type MessageRequest = { action: 'list' }
   | { action: 'send'; room: string; text: string; id: string; mention?: boolean; mentions?: string[] }
+  | { action: 'request_review'; room: string; text: string; id: string; review_id: string; repository: string;
+      pull_request: number; sha: string; reviewers: string[] }
   | { action: 'receive_attachment'; room: string; event_id: string }
   | { action: 'send_files'; room: string; id: string; files: { path: string; name?: string }[]; outbox: string };
 export type MessageAction = (request: MessageRequest, signal: AbortSignal) => Promise<string>;
@@ -67,6 +69,17 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       return JSON.stringify({ room: request.room, ...JSON.parse(result) });
     }
     const peers = links.room(bot, request.room)?.bots.filter(id => id !== bot) ?? [];
+    if (request.action === 'request_review') {
+      const recipients = [...new Set(request.reviewers)];
+      const exact = [`Review ID: ${request.review_id}`, `Repository/PR: ${request.repository}#${request.pull_request}`, `Exact SHA: ${request.sha}`];
+      if (!exact.every(line => request.text.includes(line))) throw new PublicError('Review request text must repeat its exact review ID, repository/PR and SHA.');
+      if (!recipients.every(id => peers.includes(id))) throw new PublicError('Only other agents of this shared room can review.');
+      const grants = links.reserveReviewMentions(bot, request.room, request.review_id, request.sha, recipients);
+      if (!grants) throw new PublicError('Review request withheld: invalid, expired, duplicate or outside the configured shared room.');
+      const eventId = await transport.send(request.room, { msgtype: 'm.text', body: request.text + '\n\n' + recipients.join(' '),
+        'm.mentions': { user_ids: recipients }, [GRANT]: grants.length === 1 ? grants[0] : grants });
+      return JSON.stringify({ status: 'sent', room: request.room, event_id: eventId });
+    }
     if ((request.mention || request.mentions?.length) && request.room === home) throw new PublicError('Room message withheld: mentions are only for other agents of a shared room.');
     if (request.mention && request.mentions !== undefined) throw new PublicError('Choose mention or mentions, not both.');
     if (request.mention && peers.length !== 1) throw new PublicError('Select recipients with mentions in a room with more than two agents.');

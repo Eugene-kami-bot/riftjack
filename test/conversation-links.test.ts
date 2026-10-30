@@ -1088,6 +1088,45 @@ test('an external owner turn restores bounded peer credit once and room sends ar
   assert.equal(longLivedSends, 40);
 });
 
+test('a background managed-review request is exact, one-shot and grants no peer credit', async t => {
+  const f = fixture(t), signal = new AbortController().signal;
+  let sends = 0, delivered: MatrixEvent | undefined;
+  const tool = workerRoomMessages(f.links, bot, human, {
+    allowed: async () => true, stopping: () => false,
+    send: async (room, content) => {
+      delivered = { type: 'm.room.message', sender: bot, event_id: '$review-' + ++sends,
+        origin_server_ts: Date.now(), room_id: room, content };
+      return delivered.event_id!;
+    },
+  });
+  const review = { action: 'request_review', room: group, id: 'managed-review-1',
+    review_id: 'project-123-abcdef12-20260101T0000Z', repository: 'example/project', pull_request: 123,
+    sha: 'a'.repeat(40), reviewers: [peer],
+    text: 'Please inspect the exact head.\nReview ID: project-123-abcdef12-20260101T0000Z\nRepository/PR: example/project#123\nExact SHA: ' + 'a'.repeat(40) };
+  const first = JSON.parse(await tool(review, signal));
+  assert.equal(first.event_id, '$review-1');
+  assert.equal(f.links.peerCredit(bot), 0);
+  assert.deepEqual(delivered!.content!['m.mentions'], { user_ids: [peer] });
+  assert.equal((delivered!.content![GRANT] as any).remaining, 0);
+  assert.deepEqual(JSON.parse(await tool(review, signal)), { status: 'sent', room: group, event_id: '$review-1', replayed: true });
+  assert.equal(sends, 1);
+  await assert.rejects(tool({ ...review, id: 'managed-review-2' }, signal), /duplicate/);
+  const reloaded = workerRoomMessages(f.load(), bot, human, {
+    allowed: async () => true, stopping: () => false, send: async () => '$unexpected',
+  });
+  await assert.rejects(reloaded({ ...review, id: 'managed-review-3' }, signal), /duplicate/);
+  for (const invalid of [
+    { ...review, id: 'bad-text', review_id: 'other-review' },
+    { ...review, id: 'bad-reviewer', review_id: 'other-review', reviewers: ['@outsider:test'],
+      text: review.text.replace('project-123-abcdef12-20260101T0000Z', 'other-review') },
+    { ...review, id: 'bad-sha', review_id: 'other-review', sha: 'A'.repeat(40),
+      text: review.text.replace('project-123-abcdef12-20260101T0000Z', 'other-review') },
+    { ...review, id: 'bad-authority', review_id: 'other-review', owner_turn: { id: 'owner', time: Date.now() },
+      text: review.text.replace('project-123-abcdef12-20260101T0000Z', 'other-review') },
+  ]) await assert.rejects(tool(invalid, signal));
+  assert.equal(sends, 1);
+});
+
 test('a recipient keeps its own larger credit even when a mention passes zero', t => {
   const { a, b } = separateInstallations(t);
   a.links.credit(bot);

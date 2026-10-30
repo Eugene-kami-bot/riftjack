@@ -29,8 +29,9 @@ type Credit = { level: number; since: number };
 type WireGrant = { version: 1; id: string; from: string; to: string; room: string; remaining: number; since: number };
 type Grant = { from: string; to: string; room: string; level: number; since: number; wire?: WireGrant };
 type ExternalSend = { digest: string; status: 'uncertain' | 'sent'; expires: number; eventId?: string };
+type ReviewRequest = { digest: string; expires: number };
 type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number>;
-  externalOrigins?: Record<string, number>; externalSends?: Record<string, ExternalSend> };
+  externalOrigins?: Record<string, number>; externalSends?: Record<string, ExternalSend>; reviewRequests?: Record<string, ReviewRequest> };
 const CREDITS_KEY = '#credits';
 const roomMembers = (room: Room) => [room.owner, ...room.bots, ...(room.observers ?? [])];
 const membershipKey = (room: Room) => JSON.stringify([room.owner, ...roomMembers(room).slice(1).sort()]);
@@ -177,6 +178,28 @@ export class ConversationLinks {
     this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, g]) => now - g.since < CREDIT_TTL_MS).slice(-99));
     for (const wire of wires) if (this.agent(wire.to)) {
       this.credits.grants[wire.id] = { from: bot, to: wire.to, room, level: remaining, since, wire };
+    }
+    this.saveHistory();
+    return wires;
+  }
+  // A managed-review request is a separate, one-shot authority. It starts only
+  // the exact reviewers named by the request and gives them no transferable
+  // peer credit. Reusing a review ID, even with another worker message ID, is
+  // rejected so a background supervisor cannot fan out duplicate review turns.
+  reserveReviewMentions(bot: string, room: string, reviewId: string, sha: string, recipients: string[], now = Date.now()): WireGrant[] | undefined {
+    const shared = this.room(bot, room), peers = [...new Set(recipients)].sort();
+    if (!shared || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(reviewId) || !/^[0-9a-f]{40}$/.test(sha) ||
+        !peers.length || peers.length > 2 || !peers.every(id => id !== bot && shared.bots.includes(id))) return;
+    const requests = this.credits.reviewRequests = Object.fromEntries(Object.entries(this.credits.reviewRequests ?? {})
+      .filter(([, request]) => request.expires > now));
+    const key = JSON.stringify([bot, room, reviewId]), digest = JSON.stringify([sha, peers]);
+    if (requests[key]) return;
+    if (Object.keys(requests).length >= 10_000) return;
+    requests[key] = { digest, expires: now + CREDIT_TTL_MS };
+    const wires: WireGrant[] = peers.map(to => ({ version: 1, id: randomUUID(), from: bot, to, room, since: now, remaining: 0 }));
+    this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, g]) => now - g.since < CREDIT_TTL_MS).slice(-99));
+    for (const wire of wires) if (this.agent(wire.to)) {
+      this.credits.grants[wire.id] = { from: bot, to: wire.to, room, level: 0, since: now, wire };
     }
     this.saveHistory();
     return wires;

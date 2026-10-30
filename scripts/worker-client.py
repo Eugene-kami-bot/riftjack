@@ -87,12 +87,15 @@ def main():
                 'time': int(datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() * 1000)}
 
     if args.command == 'mcp':
-        tool = {'name': 'room_messages', 'description': 'List linked Matrix rooms or send an encrypted message to one. '
-            'A mentioning send prompted by the owner in Telegram must include the current Nerve owner_session; peer, timer and background turns must omit it.',
+        tool = {'name': 'room_messages', 'description': 'List linked Matrix rooms, send an encrypted message, or issue one bounded managed-review request. '
+            'A mentioning send prompted by the owner in Telegram must include the current Nerve owner_session; peer, timer and background turns must omit it. '
+            'Background review supervision must use request_review, which starts only its exact reviewers and grants no general peer credit.',
             'inputSchema': {'type': 'object', 'properties': {
-                'action': {'type': 'string', 'enum': ['list', 'send']}, 'room': {'type': 'string'}, 'text': {'type': 'string'},
+                'action': {'type': 'string', 'enum': ['list', 'send', 'request_review']}, 'room': {'type': 'string'}, 'text': {'type': 'string'},
                 'id': {'type': 'string'}, 'mention': {'type': 'boolean'}, 'mentions': {'type': 'array', 'items': {'type': 'string'}},
-                'owner_session': {'type': 'string'}}, 'required': ['action'], 'additionalProperties': False},
+                'owner_session': {'type': 'string'}, 'review_id': {'type': 'string'}, 'repository': {'type': 'string'},
+                'pull_request': {'type': 'integer'}, 'sha': {'type': 'string'}, 'reviewers': {'type': 'array', 'items': {'type': 'string'}}},
+                'required': ['action'], 'additionalProperties': False},
             'annotations': {'destructiveHint': False, 'openWorldHint': True}}
         for line in sys.stdin:
             message = {}
