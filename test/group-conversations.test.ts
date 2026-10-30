@@ -173,6 +173,21 @@ test('multi-recipient grants work between separate installations without replay 
   assert.equal(admit(instances[1].links, bots[1], other), undefined);
 });
 
+test('standing review grants start exact reviewers without restoring transferable credit', t => {
+  const instances = bots.map(bot => fixture(t, [bot]));
+  const grants = instances[0].links.reserveReviewMentions(bots[0], room, 'project-123-review', 'a'.repeat(40), bots.slice(1))!;
+  assert.equal(instances[0].links.peerCredit(bots[0]), 0);
+  const event: MatrixEvent = { ...message(bots[0], '$review'), content: { msgtype: 'm.text', body: 'Review exact head',
+    'm.mentions': { user_ids: bots.slice(1) }, [GRANT]: grants } };
+  for (const i of [1, 2]) {
+    assert.equal(instances[i].links.observe(bots[i], room, event), true);
+    assert.ok(instances[i].links.mention(bots[i], room, event));
+    assert.equal(instances[i].links.peerCredit(bots[i]), 0);
+  }
+  assert.equal(instances[0].links.reserveReviewMentions(bots[0], room, 'project-123-review', 'a'.repeat(40), bots.slice(1)), undefined);
+  assert.ok(instances[0].links.reserveReviewMentions(bots[0], room, 'project-123-review-v2', 'b'.repeat(40), [bots[1]]));
+});
+
 test('a three-agent mention cycle exhausts its credit without new human messages', t => {
   const f = fixture(t);
   for (const bot of bots) f.links.credit(bot);

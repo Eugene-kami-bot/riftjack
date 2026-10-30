@@ -36,7 +36,7 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
     if (request.action === 'reject') throw new PublicError('Correct the room request.');
     return JSON.stringify(request.action === 'list' ? { rooms: [{ room: '!shared:test', type: 'shared', agents: ['@grok:test', '@peer:test'] }] }
       : { status: 'sent', room: request.room, event_id: '$worker-room' });
-  });
+  }, 'r'.repeat(43));
   const port = await server.start(0);
   t.after(async () => { service.stop(); await server.stop(); queue.close(); });
   const base = `http://127.0.0.1:${port}/v1/bots/%40grok%3Atest/tasks`;
@@ -50,6 +50,15 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   assert.equal((await fetch(roomsUrl, { method: 'POST', headers: { Origin: 'https://browser.test', Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
   assert.deepEqual(await (await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'list' }) })).json(),
     { rooms: [{ room: '!shared:test', type: 'shared', agents: ['@grok:test', '@peer:test'] }] });
+  const reviewBody = { action: 'request_review', room: '!shared:test' };
+  const ordinaryReview = await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify(reviewBody) });
+  assert.equal(ordinaryReview.status, 403);
+  const supervisorList = await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'r'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'list' }) });
+  assert.equal(supervisorList.status, 403);
+  const supervisorReview = await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'r'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify(reviewBody) });
+  assert.equal(supervisorReview.status, 200);
+  assert.deepEqual(roomCalls.at(-1), reviewBody);
+  assert.equal((await fetch(base, { headers: { Authorization: 'Bearer ' + 'r'.repeat(43) } })).status, 403);
   const rejected = await fetch(roomsUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + 'a'.repeat(43), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject' }) });
   assert.equal(rejected.status, 400);
   assert.deepEqual(await rejected.json(), { error: 'Correct the room request.' });
@@ -64,9 +73,12 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   await idle(service);
   assert.equal((await (await request('/' + task.id)).json()).status, 'delivered');
   assert.equal((await request('/' + task.id + '/reply', { lease: task.lease, text: 'different' })).status, 409);
-  const tokenFile = join(dir, 'token'), taskFile = join(dir, 'task.json'), replyFile = join(dir, 'reply.txt'), roomFile = join(dir, 'room.txt');
+  const tokenFile = join(dir, 'token'), reviewTokenFile = join(dir, 'review-token'), taskFile = join(dir, 'task.json'),
+    replyFile = join(dir, 'reply.txt'), roomFile = join(dir, 'room.txt'), reviewFile = join(dir, 'review.txt');
   writeFileSync(tokenFile, 'a'.repeat(43), { mode: 0o600 }); writeFileSync(replyFile, 'reply from CLI');
+  writeFileSync(reviewTokenFile, 'r'.repeat(43), { mode: 0o600 });
   writeFileSync(roomFile, 'delegate from CLI');
+  writeFileSync(reviewFile, 'Review ID: project-1-review\nRepository/PR: example/project#1\nExact SHA: ' + 'a'.repeat(40));
   queue.enqueue('!dm:test', event('$cli'), 'c');
   const cli = (...args: string[]) => promisify(execFile)('python3', [fileURLToPath(new URL('../../scripts/worker-client.py', import.meta.url)),
     '--url', `http://127.0.0.1:${port}`, '--bot', '@grok:test', '--token-file', tokenFile, ...args]);
@@ -86,6 +98,11 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   { status: 'sent', room: '!shared:test', event_id: '$worker-room' });
   assert.deepEqual(roomCalls.at(-1), { action: 'send', room: '!shared:test', text: 'delegate from CLI', id: 'telegram-1', mention: true,
     owner_turn: { id: 'telegram:update-1', time: roomCalls.at(-1) && (roomCalls.at(-1) as any).owner_turn.time } });
+  const reviewCli = (...args: string[]) => promisify(execFile)('python3', [fileURLToPath(new URL('../../scripts/worker-client.py', import.meta.url)),
+    '--url', `http://127.0.0.1:${port}`, '--bot', '@grok:test', '--token-file', reviewTokenFile, ...args]);
+  assert.deepEqual(JSON.parse((await reviewCli('request-review', '--room', '!shared:test', '--text-file', reviewFile, '--id', 'review-send-1',
+    '--review-id', 'project-1-review', '--repository', 'example/project', '--pull-request', '1', '--sha', 'a'.repeat(40),
+    '--reviewer', '@peer:test')).stdout), { status: 'sent', room: '!shared:test', event_id: '$worker-room' });
   const mcp = spawn('python3', [fileURLToPath(new URL('../../scripts/worker-client.py', import.meta.url)),
     '--url', `http://127.0.0.1:${port}`, '--bot', '@grok:test', '--token-file', tokenFile, 'mcp'], { stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { mcp.kill(); });
@@ -97,7 +114,9 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
     return replies.at(-1);
   };
   assert.equal((await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } })).result.serverInfo.name, 'riftjack-worker-rooms');
-  assert.equal((await call({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).result.tools[0].name, 'room_messages');
+  const listedTools = (await call({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).result.tools;
+  assert.equal(listedTools[0].name, 'room_messages');
+  assert.deepEqual(listedTools[0].inputSchema.properties.action.enum, ['list', 'send']);
   const listed = await call({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'room_messages', arguments: { action: 'list' } } });
   assert.equal(JSON.parse(listed.result.content[0].text).rooms[0].room, '!shared:test');
   mcp.stdin!.end(); lines.close(); mcp.kill();

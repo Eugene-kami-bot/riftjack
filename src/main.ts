@@ -254,9 +254,13 @@ async function main() {
       const workerDir = join(dir, 'worker');
       const queue = new WorkerQueue(join(workerDir, 'queue.sqlite'));
       const tokenFile = join(workerDir, 'token');
+      const reviewTokenFile = join(workerDir, 'review-token');
       if (!existsSync(tokenFile)) writeFileSync(tokenFile, randomBytes(32).toString('base64url') + '\n', { flag: 'wx', mode: 0o600 });
+      if (!existsSync(reviewTokenFile)) writeFileSync(reviewTokenFile, randomBytes(32).toString('base64url') + '\n', { flag: 'wx', mode: 0o600 });
       const token = readFileSync(tokenFile, 'utf8').trim();
+      const reviewToken = readFileSync(reviewTokenFile, 'utf8').trim();
       if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new PublicError('Invalid Grok worker token file.');
+      if (!/^[A-Za-z0-9_-]{43}$/.test(reviewToken) || reviewToken === token) throw new PublicError('Invalid review supervisor token file.');
       const service = new WorkerService(queue, join(workerDir, 'uploads'), config.maxMediaBytes, {
         transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
         allowed: task => privateRoom(task.room, task.event.sender!),
@@ -297,7 +301,7 @@ async function main() {
         maxBytes: botConfig.maxMediaBytes,
         sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
       }) : undefined;
-      workers.set(account.userId, service); workerServer.add(account.userId, token, service, workerRooms);
+      workers.set(account.userId, service); workerServer.add(account.userId, token, service, workerRooms, reviewToken);
       bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget,
         conversationKey: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
         reply: async (room, event, text) => {
@@ -306,6 +310,7 @@ async function main() {
         },
       });
       console.log(account.userId + ' worker token file: ' + tokenFile);
+      console.log(account.userId + ' review supervisor token file: ' + reviewTokenFile);
     } else bridge = new Bridge({
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),

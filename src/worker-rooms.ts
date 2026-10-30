@@ -32,6 +32,30 @@ export function workerRoomMessages(links: ConversationLinks, bot: string, owner:
         throw new PublicError('owner_turn must identify a fresh authenticated human event from the last 24 hours.');
       }
     }
+    if (raw.action === 'request_review') {
+      const allowed = ['action', 'room', 'text', 'id', 'review_id', 'repository', 'pull_request', 'sha', 'reviewers'];
+      if (Object.keys(raw).some(key => !allowed.includes(key)) || typeof raw.room !== 'string' || !/^![^\s:]+:[^\s]+$/.test(raw.room) ||
+          typeof raw.text !== 'string' || !raw.text.trim() || Buffer.byteLength(raw.text, 'utf8') > 6000 ||
+          typeof raw.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(raw.id) ||
+          typeof raw.review_id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(raw.review_id) ||
+          typeof raw.repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw.repository) ||
+          !Number.isSafeInteger(raw.pull_request) || (raw.pull_request as number) < 1 ||
+          typeof raw.sha !== 'string' || !/^[0-9a-f]{40}$/.test(raw.sha) || !Array.isArray(raw.reviewers) ||
+          raw.reviewers.length < 1 || raw.reviewers.length > 2 || new Set(raw.reviewers).size !== raw.reviewers.length ||
+          !raw.reviewers.every(id => typeof id === 'string' && /^@[^\s:]+:[^\s]+$/.test(id))) {
+        throw new PublicError('Use request_review with a linked room, unique message ID, review ID, repository, pull request, exact SHA and one or two distinct reviewer Matrix IDs.');
+      }
+      const request = raw as unknown as Parameters<typeof action>[0];
+      const digest = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+      const previous = links.beginExternalSend(bot, raw.id, digest);
+      if (previous) return JSON.stringify(previous.status === 'sent'
+        ? { status: 'sent', room: raw.room, event_id: previous.eventId, replayed: true }
+        : { status: 'uncertain', room: raw.room, replayed: true });
+      const result = await action(request, signal);
+      const parsed = JSON.parse(result) as { status?: string; event_id?: string };
+      if (parsed.status === 'sent' && typeof parsed.event_id === 'string') links.finishExternalSend(bot, raw.id, digest, parsed.event_id);
+      return result;
+    }
     const request = Object.fromEntries(Object.entries(raw).filter(([key]) => key !== 'owner_turn'));
     if (request.action !== 'send') return deliver(request, signal);
     if (typeof request.id !== 'string') return deliver(request, signal);
