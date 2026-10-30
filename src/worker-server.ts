@@ -6,10 +6,12 @@ import type { WorkerService } from './worker-service.js';
 import type { RoomMessageTool } from './room-messages.js';
 
 export class WorkerServer {
-  private bots = new Map<string, { token: string; service: WorkerService; rooms?: RoomMessageTool }>();
+  private bots = new Map<string, { token: string; reviewToken?: string; service: WorkerService; rooms?: RoomMessageTool }>();
   private controllers = new Set<AbortController>();
   private server = createServer((request, response) => { void this.handle(request, response); });
-  add(bot: string, token: string, service: WorkerService, rooms?: RoomMessageTool) { this.bots.set(bot, { token, service, rooms }); }
+  add(bot: string, token: string, service: WorkerService, rooms?: RoomMessageTool, reviewToken?: string) {
+    this.bots.set(bot, { token, reviewToken, service, rooms });
+  }
   remove(bot: string) { this.bots.delete(bot); }
   async start(port: number) {
     await new Promise<void>((resolve, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', resolve); });
@@ -34,7 +36,11 @@ export class WorkerServer {
       const match = /^\/v1\/bots\/([^/]+)\/(tasks|rooms)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment))?)?$/.exec(url.pathname);
       const selected = match && this.bots.get(decodeURIComponent(match[1]));
       const bearer = request.headers.authorization?.replace(/^Bearer /, '') || '';
-      if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
+      const matches = (candidate?: string) => !!candidate && Buffer.byteLength(bearer) === Buffer.byteLength(candidate) &&
+        timingSafeEqual(Buffer.from(bearer), Buffer.from(candidate));
+      const reviewCredentials = !!selected && matches(selected.reviewToken);
+      if (!selected || (!matches(selected.token) && !reviewCredentials)) throw new WorkerError(401, 'Invalid bot credentials.');
+      if (reviewCredentials && match![2] !== 'rooms') throw new WorkerError(403, 'Review supervisor credentials are restricted to review requests.');
       const { service } = selected;
       if (match![2] === 'rooms') {
         roomsRequest = true;
@@ -48,6 +54,11 @@ export class WorkerServer {
         let body;
         try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
         catch { throw new WorkerError(400, 'Expected JSON.'); }
+        if ((body?.action === 'request_review') !== reviewCredentials) {
+          throw new WorkerError(403, reviewCredentials
+            ? 'Review supervisor credentials are restricted to review requests.'
+            : 'Managed-review requests require separate supervisor credentials.');
+        }
         const result = await selected.rooms(body, controller.signal);
         send(200, JSON.parse(result)); return;
       }

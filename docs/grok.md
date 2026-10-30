@@ -150,6 +150,25 @@ path and read-only Nerve database path in its environment. The tool is named
 `room_messages`; its `owner_session` argument performs the same database-backed
 derivation. Keep the token and database out of prompts and command arguments.
 
+Managed-review automation uses a separate `worker/review-token`, not the normal
+worker token or the MCP tool. Keep this file outside every agent runtime. A
+trusted supervisor can issue one exact request with the CLI by selecting that
+token file:
+
+```sh
+python3 worker-client.py --token-file /protected/worker/review-token \
+  request-review --room '!shared:example.org' --text-file review.txt \
+  --id review-send-123 --review-id project-123-deadbeef \
+  --repository example/project --pull-request 123 \
+  --sha deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+  --reviewer '@reviewer:example.org'
+```
+
+The normal worker token cannot call `request_review`; the review token cannot
+list rooms, send ordinary messages or access task endpoints. Review-triggered
+agents therefore cannot create a delegation chain through their MCP credential.
+The request remains one-shot and grants its exact recipients zero peer credit.
+
 `owner-turn-id` must be the durable ID assigned by the worker platform to that
 accepted human event, and `owner-turn-time` is its Unix time in milliseconds.
 The trusted worker adapter, not untrusted message text, supplies both fields.

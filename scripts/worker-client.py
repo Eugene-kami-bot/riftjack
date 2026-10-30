@@ -29,6 +29,15 @@ def main():
     sub.add_parser('mcp', help='Serve linked-room actions as a stdio MCP tool')
     wait = sub.add_parser('wait'); wait.add_argument('--seconds', type=int, default=300)
     sub.add_parser('rooms')
+    review = sub.add_parser('request-review', help='Send a managed-review request using the separate supervisor token')
+    review.add_argument('--room', required=True)
+    review.add_argument('--text-file', required=True, help='UTF-8 request text containing the exact review fields')
+    review.add_argument('--id', required=True, help='Durable idempotency key')
+    review.add_argument('--review-id', required=True)
+    review.add_argument('--repository', required=True)
+    review.add_argument('--pull-request', required=True, type=int)
+    review.add_argument('--sha', required=True)
+    review.add_argument('--reviewer', action='append', required=True, help='Exact reviewer Matrix ID; repeat at most twice')
     send = sub.add_parser('send')
     send.add_argument('--room', required=True)
     send.add_argument('--text-file', required=True, help='UTF-8 message text')
@@ -87,14 +96,12 @@ def main():
                 'time': int(datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() * 1000)}
 
     if args.command == 'mcp':
-        tool = {'name': 'room_messages', 'description': 'List linked Matrix rooms, send an encrypted message, or issue one bounded managed-review request. '
-            'A mentioning send prompted by the owner in Telegram must include the current Nerve owner_session; peer, timer and background turns must omit it. '
-            'Background review supervision must use request_review, which starts only its exact reviewers and grants no general peer credit.',
+        tool = {'name': 'room_messages', 'description': 'List linked Matrix rooms or send an encrypted message. '
+            'A mentioning send prompted by the owner in Telegram must include the current Nerve owner_session; peer, timer and background turns must omit it.',
             'inputSchema': {'type': 'object', 'properties': {
-                'action': {'type': 'string', 'enum': ['list', 'send', 'request_review']}, 'room': {'type': 'string'}, 'text': {'type': 'string'},
+                'action': {'type': 'string', 'enum': ['list', 'send']}, 'room': {'type': 'string'}, 'text': {'type': 'string'},
                 'id': {'type': 'string'}, 'mention': {'type': 'boolean'}, 'mentions': {'type': 'array', 'items': {'type': 'string'}},
-                'owner_session': {'type': 'string'}, 'review_id': {'type': 'string'}, 'repository': {'type': 'string'},
-                'pull_request': {'type': 'integer'}, 'sha': {'type': 'string'}, 'reviewers': {'type': 'array', 'items': {'type': 'string'}}},
+                'owner_session': {'type': 'string'}},
                 'required': ['action'], 'additionalProperties': False},
             'annotations': {'destructiveHint': False, 'openWorldHint': True}}
         for line in sys.stdin:
@@ -130,6 +137,11 @@ def main():
         print(json.dumps({'timeout': True})); return
     if args.command == 'rooms':
         print(json.dumps(request_body(root + '/rooms', {'action': 'list'}), ensure_ascii=False)); return
+    if args.command == 'request-review':
+        body = {'action': 'request_review', 'room': args.room, 'text': Path(args.text_file).read_text(), 'id': args.id,
+            'review_id': args.review_id, 'repository': args.repository, 'pull_request': args.pull_request,
+            'sha': args.sha, 'reviewers': args.reviewer}
+        print(json.dumps(request_body(root + '/rooms', body), ensure_ascii=False)); return
     if args.command == 'send':
         if not (args.owner_turn_id is None) == (args.owner_turn_time is None):
             parser.error('--owner-turn-id and --owner-turn-time must be supplied together')
